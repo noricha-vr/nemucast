@@ -27,24 +27,20 @@ class TestRefactoredFunctions:
 
     def test_setup_logging(self, tmp_path, monkeypatch):
         """ロギング設定のテスト"""
-        # 一時的なログディレクトリを使用
-        test_file = tmp_path / "test_main.py"
-        test_file.write_text("")
-        monkeypatch.setattr("nemucast.main.__file__", str(test_file))
-        
         # LOG_LEVELを設定
         monkeypatch.setenv("LOG_LEVEL", "DEBUG")
-        
+        monkeypatch.chdir(tmp_path)
+
         # ロギングをリセット
         logging.getLogger().handlers = []
-        
+
         setup_logging()
-        
+
         # ログレベルがDEBUGに設定されているか確認
         assert logging.getLogger().level == logging.DEBUG
-        
+
         # ログディレクトリが作成されているか確認
-        log_dir = test_file.parent / "logs"
+        log_dir = tmp_path / "logs"
         assert log_dir.exists()
 
     def test_discover_chromecasts_found(self):
