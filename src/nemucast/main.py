@@ -10,6 +10,7 @@ lower_cast_volume.py
 import os
 import time
 import logging
+import logging.handlers
 import sys
 import argparse
 from pathlib import Path
@@ -63,18 +64,19 @@ def parse_args(args=None):
 
 def setup_logging() -> None:
     """ロギングの設定を行う"""
-    log_dir = Path(__file__).resolve().parent / "logs"
+    log_dir = Path.cwd() / "logs"
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / "lower_cast_volume.log"
 
-    # 環境変数でログレベルを設定可能にする
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-    
+
     logging.basicConfig(
         level=getattr(logging, log_level, logging.INFO),
         format="[%(asctime)s] %(levelname)s: %(message)s",
         handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
+            logging.handlers.RotatingFileHandler(
+                log_file, maxBytes=512 * 1024, backupCount=1, encoding="utf-8"
+            ),
             logging.StreamHandler(sys.stdout),
         ],
     )
