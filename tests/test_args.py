@@ -11,6 +11,7 @@ def test_parse_args_default():
     assert args.name == "Dell"
     assert args.step == -0.04
     assert args.min_level == 0.4
+    assert args.timeout == 21600
 
 
 def test_parse_args_custom():
@@ -19,12 +20,14 @@ def test_parse_args_custom():
         "--interval", "600",
         "--name", "Living Room",
         "--step", "-0.05",
-        "--min-level", "0.2"
+        "--min-level", "0.2",
+        "--timeout", "3600"
     ])
     assert args.interval == 600
     assert args.name == "Living Room"
     assert args.step == -0.05
     assert args.min_level == 0.2
+    assert args.timeout == 3600
 
 
 def test_parse_args_short():
@@ -33,12 +36,14 @@ def test_parse_args_short():
         "-i", "300",
         "-n", "Bedroom",
         "-s", "-0.03",
-        "-m", "0.25"
+        "-m", "0.25",
+        "-t", "7200"
     ])
     assert args.interval == 300
     assert args.name == "Bedroom"
     assert args.step == -0.03
     assert args.min_level == 0.25
+    assert args.timeout == 7200
 
 
 def test_parse_args_mixed():

@@ -27,6 +27,7 @@ CHROMECAST_NAME = os.getenv("CHROMECAST_NAME", "Dell")
 STEP = float(os.getenv("STEP", "-0.04"))
 MIN_LEVEL = float(os.getenv("MIN_LEVEL", "0.3"))
 DEFAULT_INTERVAL_SEC = int(os.getenv("INTERVAL_SEC", "1200"))
+DEFAULT_TIMEOUT_SEC = int(os.getenv("TIMEOUT_SEC", "21600"))
 # ========================
 
 
@@ -59,7 +60,16 @@ def parse_args(args=None):
         default=MIN_LEVEL,
         help=f"最小音量レベル。デフォルト: {MIN_LEVEL}"
     )
-    return parser.parse_args(args)
+    parser.add_argument(
+        "-t", "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT_SEC,
+        help=f"アイドル状態での最大待機時間（秒）。デフォルト: {DEFAULT_TIMEOUT_SEC}秒"
+    )
+    parsed = parser.parse_args(args)
+    if parsed.timeout <= 0:
+        parser.error("--timeout は正の整数を指定してください")
+    return parsed
 
 
 def setup_logging() -> None:
@@ -183,9 +193,29 @@ def is_chromecast_active(cast) -> bool:
         return True
 
 
+def wait_for_active(cast, timeout_sec: int, poll_interval: int = 60) -> bool:
+    """Chromecastがアクティブになるまで待機する
+
+    Args:
+        cast: Chromecastオブジェクト
+        timeout_sec: タイムアウト秒数
+        poll_interval: ポーリング間隔（秒）
+
+    Returns:
+        アクティブになったらTrue、タイムアウトならFalse
+    """
+    elapsed = 0
+    while elapsed < timeout_sec:
+        if is_chromecast_active(cast):
+            return True
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+    logging.info("待機タイムアウト: %d秒経過してもアクティブになりませんでした。", timeout_sec)
+    return False
+
+
 def get_initial_volume(cast) -> float:
     """起動時の音量を取得する"""
-    cast.media_controller.update_status()
     initial_volume = cast.status.volume_level
     if initial_volume is None:
         logging.warning("起動時の音量を取得できませんでした。0.5を使用します。")
@@ -241,9 +271,9 @@ def volume_control_loop(cast, interval_sec: int, step: float, min_level: float, 
     while True:
         # Chromecastがアクティブかどうかチェック
         if not is_chromecast_active(cast):
-            logging.info("Chromecastはアイドル状態です。音量調整をスキップします。")
-            time.sleep(interval_sec)
-            continue
+            logging.info("Chromecastがアイドル状態に戻りました。音量を初期値に戻して終了します。")
+            restore_volume_and_standby(cast, initial_volume)
+            break
         
         # アクティブな場合、起動中のアプリをログ出力
         log_active_app_status(cast)
@@ -295,11 +325,20 @@ def main() -> None:
     try:
         logging.info("接続完了: %s (%s)", cast.cast_info.friendly_name, cast.cast_info.host)
         cast.wait()  # ソケット接続確立を待つ
-        
+
         # Chromecastの状態をログ出力
         log_chromecast_status(cast)
-        
-        # 起動時の音量を保存
+
+        # アイドルならアクティブになるまで待機
+        initial_volume = None
+        if not is_chromecast_active(cast):
+            logging.info("Chromecastはアイドル状態です。アクティブになるまで待機します...")
+            if not wait_for_active(cast, args.timeout):
+                logging.info("タイムアウトしました。プログラムを終了します。")
+                return  # finally で stop_discovery が呼ばれる
+            logging.info("Chromecastがアクティブになりました。")
+
+        # ここに来た時点でアクティブ
         initial_volume = get_initial_volume(cast)
 
         # 音量制御ループを開始
@@ -308,9 +347,10 @@ def main() -> None:
     except KeyboardInterrupt:
         logging.info("\n中断されました。音量を初期値に戻します...")
         try:
-            cast.set_volume(initial_volume)
-            logging.info("音量を初期値 %.2f に戻しました。", initial_volume)
-            time.sleep(1)  # 音量設定が反映されるまで待機
+            if initial_volume is not None:
+                cast.set_volume(initial_volume)
+                logging.info("音量を初期値 %.2f に戻しました。", initial_volume)
+                time.sleep(1)  # 音量設定が反映されるまで待機
         except Exception as e:
             logging.error("音量の復元に失敗しました: %s", e)
         raise

@@ -18,6 +18,8 @@ from nemucast.main import (
     get_initial_volume,
     adjust_volume,
     restore_volume_and_standby,
+    wait_for_active,
+    volume_control_loop,
 )
 import pychromecast
 
@@ -128,11 +130,10 @@ class TestRefactoredFunctions:
         """初期音量取得のテスト"""
         mock_cast = Mock()
         mock_cast.status.volume_level = 0.75
-        
+
         volume = get_initial_volume(mock_cast)
-        
+
         assert volume == 0.75
-        mock_cast.media_controller.update_status.assert_called_once()
 
     def test_get_initial_volume_none(self, caplog):
         """初期音量取得のテスト（取得失敗時）"""
@@ -175,9 +176,52 @@ class TestRefactoredFunctions:
     def test_restore_volume_and_standby_already_idle(self):
         """音量復元とスタンバイのテスト（既にアイドル状態）"""
         mock_cast = Mock()
-        
+
         with patch("nemucast.main.is_chromecast_active", return_value=False):
             restore_volume_and_standby(mock_cast, 0.7)
-            
+
         mock_cast.set_volume.assert_called_once_with(0.7)
         mock_cast.quit_app.assert_not_called()
+
+    def test_wait_for_active_immediately_active(self):
+        """wait_for_activeのテスト（最初からアクティブ）"""
+        mock_cast = Mock()
+
+        with patch("nemucast.main.is_chromecast_active", return_value=True):
+            result = wait_for_active(mock_cast, timeout_sec=300, poll_interval=60)
+
+        assert result is True
+
+    def test_wait_for_active_becomes_active(self):
+        """wait_for_activeのテスト（3回目のポーリングでアクティブ）"""
+        mock_cast = Mock()
+
+        with patch("nemucast.main.is_chromecast_active", side_effect=[False, False, True]), \
+             patch("nemucast.main.time.sleep") as mock_sleep:
+            result = wait_for_active(mock_cast, timeout_sec=300, poll_interval=60)
+
+        assert result is True
+        assert mock_sleep.call_count == 2
+
+    def test_wait_for_active_timeout(self):
+        """wait_for_activeのテスト（タイムアウト）"""
+        mock_cast = Mock()
+
+        with patch("nemucast.main.is_chromecast_active", return_value=False), \
+             patch("nemucast.main.time.sleep"):
+            result = wait_for_active(mock_cast, timeout_sec=120, poll_interval=60)
+
+        assert result is False
+
+    def test_volume_control_loop_idle_exit(self):
+        """volume_control_loopのテスト（アイドルに戻った時に終了）"""
+        mock_cast = Mock()
+
+        with patch("nemucast.main.is_chromecast_active", return_value=False), \
+             patch("nemucast.main.restore_volume_and_standby") as mock_restore:
+            volume_control_loop(
+                mock_cast, interval_sec=60, step=-0.04,
+                min_level=0.3, initial_volume=0.7,
+            )
+
+        mock_restore.assert_called_once_with(mock_cast, 0.7)
