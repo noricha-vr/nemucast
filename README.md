@@ -1,277 +1,120 @@
 # ねむキャス (Nemucast) 🔊😴
 
-Chromecast / Google TV の音量を定期的に自動で下げるPythonツールです。「ねむキャス」は、寝落ちするときに音量を徐々に下げて、最終的に自動でスタンバイモードに移行させるためのツールです。
+Chromecast / Google TV の音量を自動で下げて、一定時間ユーザー操作がなければ standby にするツールです。  
+Chromecast の active / idle 判定には頼らず、`前回自動設定した音量` と `現在音量` の差分からユーザー活動を判定します。
 
 ![alt text](images/assets_task_01jy97dj7yey59zsq6vq5zd7dx_1750509022_img_1.webp)
 
 ## 🎯 機能
 
-- **自動音量調整**: 指定した間隔で Chromecast の音量を段階的に下げます
-- **最小音量での自動スタンバイ**: 設定した最小音量に達すると、デバイスを自動的にスタンバイモードにします
-- **音量の自動復元**: プログラム起動時の音量を記憶し、終了時に元の音量に戻します
-- **柔軟な設定**: 環境変数により、音量の下げ幅、間隔、最小レベルなどをカスタマイズ可能
-- **ログ出力**: 動作状況をファイルとコンソールの両方に記録
+- **活動判定を state で保持**: `last_auto_volume` と `inactive_streak` を JSON に保存します
+- **手動上昇を検出**: 前回の自動設定音量より上がっていれば活動ありとみなします
+- **定期実行にも連続実行にも対応**: 1回だけの tick 実行と、standby まで継続する session 実行の両方をサポートします
+- **cron 用プロファイル付き**: 20:00 用と 00:30 用のコマンドをそのまま使えます
 
 ## 📋 必要な環境
 
-- Python 3.9 以上（推奨: 3.13+）
+- Python 3.11 以上
 - 同一ネットワーク上に Chromecast / Google TV デバイス
-- macOS / Linux / Windows
-- uv（Python環境管理ツール）
+- `uv`
 
-## 🚀 インストール手順
-
-### 1. uv のインストール
-
-```bash
-# macOS/Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# または pipx を使用
-pipx install uv
-
-# Windows (PowerShell)
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-### 2. リポジトリのクローン
+## 🚀 インストール
 
 ```bash
 git clone https://github.com/noricha-vr/nemucast.git
 cd nemucast
-```
-
-### 3. 依存関係のインストール
-
-```bash
-# uvを使用して依存関係をインストール
 uv sync
-```
-
-## ⚙️ 設定
-
-### 1. 環境変数ファイルの作成
-
-`.env.example` をコピーして `.env` ファイルを作成します：
-
-```bash
 cp .env.example .env
 ```
 
-### 2. 環境変数の設定
+## ⚙️ 基本設定
 
-`.env` ファイルを編集して、以下の値を設定します：
+| 環境変数 | 説明 | デフォルト |
+|---------|------|-----------|
+| `CHROMECAST_NAME` | 通常実行時の対象デバイス名 | `"Dell"` |
+| `STEP` | 1回で下げる音量幅 | `-0.04` |
+| `MIN_LEVEL` | これ以上は下げない最小音量 | `0.3` |
+| `INTERVAL_SEC` | 定期実行の想定間隔 | `1200` |
+| `INACTIVE_THRESHOLD` | 連続非アクティブ回数のしきい値 | `3` |
+| `MANUAL_RISE_THRESHOLD` | 手動上昇とみなす最小差分 | `0.01` |
+| `STATE_FILE` | state JSON の保存先 | `logs/activity_state.json` |
+| `STATE_STALE_INTERVAL_MULTIPLIER` | state を古いとみなす倍率 | `2` |
+| `RUN_UNTIL_STANDBY` | standby まで interval ごとに継続実行するか | `0` |
 
-| 環境変数 | 説明 | デフォルト値 | 例 | コマンドラインオプション |
-|---------|------|------------|-----|----------|
-| `CHROMECAST_NAME` | 制御対象のChromecastデバイス名<br>ネットワーク上で表示される名前を指定 | `"Dell"` | `"リビングのテレビ"` | `--name`, `-n` |
-| `STEP` | 音量を下げるステップ幅（負の値）<br>-0.04 = 4%ずつ下げる | `-0.04` | `-0.05` | `--step`, `-s` |
-| `MIN_LEVEL` | 最小音量レベル（0.0～1.0）<br>この値に達するとスタンバイモードに移行 | `0.3` | `0.2` | `--min-level`, `-m` |
-| `INTERVAL_SEC` | 音量調整の間隔（秒）<br>1200秒 = 20分 | `1200` | `600` | `--interval`, `-i` |
+state は `INTERVAL_SEC x STATE_STALE_INTERVAL_MULTIPLIER` より古いと破棄されます。
 
-### 3. Chromecast デバイス名の確認方法
+## 📖 使い方
 
-スクリプトを一度実行すると、ネットワーク上のすべての Chromecast デバイスが表示されます：
-
-```bash
-uv run python main.py
-```
-
-ログに表示されるデバイス名から、制御したいデバイスの名前を確認し、`.env` ファイルの `CHROMECAST_NAME` に設定してください。
-
-## 📖 使用方法
-
-### 基本的な実行
+### 1回だけ判定する通常実行
 
 ```bash
-# デフォルト設定で実行
-nemucast
-
-# インターバルを指定して実行（10分間隔）
-nemucast --interval 600
-
-# ショートオプションを使用
-nemucast -i 300  # 5分間隔
+uv run nemucast
+uv run nemucast --interval 900 --inactive-threshold 4
 ```
 
-### バックグラウンドで実行（Linux/macOS）
+### standby まで継続する実行
 
 ```bash
-nohup uv run python main.py &
-
-# インターバルを指定してバックグラウンド実行
-nohup uv run python main.py --interval 900 &  # 15分間隔
+uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 ```
 
-### システムサービスとして実行（systemd）
+## 🕘 cron 用プロファイル
 
-`chrome-volume-down.service` ファイルを作成：
+### 20:00 用
 
-```ini
-[Unit]
-Description=Chrome Volume Down Service
-After=network.target
+- コマンド: `nemucast-cron-20`
+- 既定値:
+  - `CRON_20_INTERVAL_SEC=60`
+  - `CRON_20_INACTIVE_THRESHOLD=1`
+  - `CRON_20_MIN_LEVEL=0.05`
+  - `CRON_20_STATE_FILE=logs/activity_state_20.json`
+- 動き:
+  - 20:00 に起動したらすぐ非アクティブ判定に到達し、そのまま standby します
+  - 実質「20:00 になったらすぐ切る」プロファイルです
 
-[Service]
-Type=simple
-User=your-username
-WorkingDirectory=/path/to/chrome-volume-down
-ExecStart=/usr/local/bin/uv run --project /path/to/chrome-volume-down python main.py
-Restart=on-failure
-RestartSec=30
+### 00:30 用
 
-[Install]
-WantedBy=multi-user.target
-```
+- コマンド: `nemucast-cron-0030`
+- 既定値:
+  - `CRON_0030_INTERVAL_SEC=900`
+  - `CRON_0030_INACTIVE_THRESHOLD=4`
+  - `CRON_0030_MIN_LEVEL=0.35`
+  - `CRON_0030_STATE_FILE=logs/activity_state_0030.json`
+- 動き:
+  - 15分ごとに音量を下げながら判定を継続します
+  - 音量操作が 45 分間なければ standby します
+  - 途中で手動で音量を上げたら、非アクティブ回数をリセットして継続します
 
-### cron による定期実行
+### cron 設定例
 
-深夜に自動的に音量を下げる場合は、cron を使用して設定できます。
-
-#### 1. crontab の編集
-
-```bash
-crontab -e
-```
-
-#### 2. 実行スケジュールの設定例
-
-```bash
-# 毎晩22時に音量下げを開始
-0 22 * * * cd /path/to/chrome-volume-down && /usr/local/bin/uv run python main.py >> /path/to/chrome-volume-down/logs/cron.log 2>&1
-
-# 毎晩23時に音量下げを開始（金・土曜日のみ）、インターバルは10分
-0 23 * * 5,6 cd /path/to/chrome-volume-down && /usr/local/bin/uv run python main.py --interval 600 >> /path/to/chrome-volume-down/logs/cron.log 2>&1
-
-# 2時間ごとに実行（深夜帯のみ: 22時、0時、2時、4時）、インターバルは5分
-0 22,0,2,4 * * * cd /path/to/chrome-volume-down && /usr/local/bin/uv run python main.py -i 300 >> /path/to/chrome-volume-down/logs/cron.log 2>&1
-```
-
-#### 3. cron 設定のポイント
-
-- **パスは絶対パスで指定**: cron 実行時は環境変数が限定的なため、フルパスを使用
-- **ログ出力**: `>> logs/cron.log 2>&1` でログを保存し、デバッグに活用
-- **環境変数の読み込み**: `.env` ファイルは `python-dotenv` が自動的に読み込みます
-
-#### 4. 実行確認
-
-cron のログを確認して正常に動作しているかチェック：
-
-```bash
-# cron 自体のログ（macOS）
-log show --predicate 'process == "cron"' --last 1h
-
-# cron 自体のログ（Linux）
-sudo grep CRON /var/log/syslog
-
-# スクリプトのログ
-tail -f /path/to/chrome-volume-down/logs/cron.log
+```cron
+0 20 * * * cd /path/to/nemucast && /path/to/.venv/bin/nemucast-cron-20 >> /path/to/nemucast/logs/cron-20.log 2>&1
+30 0 * * * cd /path/to/nemucast && /path/to/.venv/bin/nemucast-cron-0030 >> /path/to/nemucast/logs/cron-24.log 2>&1
 ```
 
 ## 🔧 動作の仕組み
 
-1. **デバイス検出**: ネットワーク上の Chromecast デバイスを自動検出
-2. **接続**: 指定された名前のデバイスに接続
-3. **初期音量記憶**: 起動時の音量レベルを保存
-4. **音量監視**: 現在の音量レベルを取得
-5. **段階的調整**: 設定された間隔で音量を下げる
-6. **最小音量チェック**: 最小レベルに達したら初期音量に戻してスタンバイモードに移行
-7. **中断時の復元**: Ctrl+C で中断した場合も初期音量に復元
+1. Chromecast に接続
+2. state JSON から `last_auto_volume` と `inactive_streak` を読む
+3. 現在音量が `last_auto_volume + MANUAL_RISE_THRESHOLD` を超えていれば活動あり
+4. 活動ありなら streak を `0` に戻す
+5. 活動なしなら streak を `+1`
+6. しきい値未満なら音量を 1 回下げる
+7. しきい値以上なら standby にして state を削除する
 
-### 処理フロー
+## 📝 ログと state
 
-```
-開始
- ↓
-Chromecastを検索
- ↓
-指定デバイスに接続
- ↓
-初期音量を記憶
- ↓
-┌─→ 現在の音量を取得
-│   ↓
-│  最小音量に達した？
-│   ├─ Yes → 初期音量に復元 → スタンバイモード → 終了
-│   └─ No → 音量を1ステップ下げる
-│       ↓
-└──── 指定時間待機
+- 実行ログ: `logs/lower_cast_volume.log`
+- 20:00 用ログ例: `logs/cron-20.log`
+- 00:30 用ログ例: `logs/cron-24.log`
+- state:
+  - 通常実行 `logs/activity_state.json`
+  - 20:00 用 `logs/activity_state_20.json`
+  - 00:30 用 `logs/activity_state_0030.json`
 
-※ Ctrl+C で中断時も初期音量に復元
-```
-
-## 🐛 トラブルシューティング
-
-### Chromecast が見つからない場合
-
-1. **同一ネットワークの確認**: PCとChromecastが同じWi-Fiネットワークに接続されているか確認
-2. **ファイアウォール**: ファイアウォールがmDNS（ポート5353）をブロックしていないか確認
-3. **デバイス名の確認**: `CHROMECAST_NAME` が正しく設定されているか確認
-
-### 音量が変更されない場合
-
-1. **デバイスの状態**: Chromecastが他のアプリで使用されていないか確認
-2. **権限**: ネットワーク上でのデバイス制御が許可されているか確認
-3. **ログの確認**: `logs/lower_cast_volume.log` でエラーメッセージを確認
-
-### エラー: "音量レベルを取得できませんでした"
-
-- Chromecastが一時的に応答していない可能性があります
-- スクリプトは自動的に再試行します
-- 頻繁に発生する場合は、Chromecastを再起動してください
-
-### プロセスの停止方法
-
-- **Ctrl+C**: フォアグラウンドで実行中の場合
-- **kill コマンド**: バックグラウンドプロセスの場合
-  ```bash
-  ps aux | grep main.py
-  kill [プロセスID]
-  ```
-
-## 📝 ログファイル
-
-ログは `logs/lower_cast_volume.log` に保存されます。以下の情報が記録されます：
-
-- デバイスの検出と接続状況
-- 音量の変更履歴
-- エラーや警告メッセージ
-- スタンバイモードへの移行
-
-## 📝 コマンドラインオプション
-
-### 使用可能なオプション
-
-| オプション | 省略形 | 説明 | デフォルト値 |
-|---------|------|------|------------|
-| `--interval` | `-i` | 音量調整の間隔（秒） | 環境変数 `INTERVAL_SEC` または 1200 |
-| `--name` | `-n` | Chromecastの名前 | 環境変数 `CHROMECAST_NAME` または "Dell" |
-| `--step` | `-s` | 音量調整のステップ（負の値） | 環境変数 `STEP` または -0.04 |
-| `--min-level` | `-m` | 最小音量レベル | 環境変数 `MIN_LEVEL` または 0.3 |
-
-### 使用例
+## ✅ テスト
 
 ```bash
-# デフォルト設定で実行
-uv run python main.py
-
-# 5分間隔で音量を下げる
-uv run python main.py --interval 300
-
-# 30分間隔で音量を下げる
-uv run python main.py -i 1800
-
-# すべてのオプションを指定して実行
-uv run python main.py --name "リビングのテレビ" --interval 600 --step -0.05 --min-level 0.2
-
-# 省略形を使用
-uv run python main.py -n "寝室のテレビ" -i 300 -s -0.03 -m 0.25
+uv run pytest -q
+uv run ruff check
 ```
-
-## 🤝 貢献
-
-Issue や Pull Request は歓迎します！
-
-## 📄 ライセンス
-
-このプロジェクトは MIT ライセンスの下で公開されています。

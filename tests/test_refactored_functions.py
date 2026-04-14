@@ -1,227 +1,370 @@
-"""リファクタリングされた関数のテスト"""
+"""主要関数のテスト"""
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
+import json
 import logging
 import sys
 from pathlib import Path
+from unittest.mock import Mock, patch
 
-# srcディレクトリをパスに追加
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from nemucast.main import (
-    setup_logging,
+from nemucast.main import (  # noqa: E402
+    append_history,
+    build_schedule_defaults,
+    calculate_next_volume,
+    clear_state,
+    create_initial_state,
+    detect_manual_activity,
     discover_chromecasts,
-    log_chromecast_status,
-    log_active_app_status,
-    is_chromecast_active,
-    get_initial_volume,
-    adjust_volume,
-    restore_volume_and_standby,
-    wait_for_active,
-    volume_control_loop,
+    is_state_stale,
+    load_state,
+    run_volume_session,
+    run_volume_tick,
+    save_state,
+    setup_logging,
+    standby_device,
+    stop_discovery,
 )
-import pychromecast
 
 
 class TestRefactoredFunctions:
-    """リファクタリングされた関数のテストクラス"""
+    """主要関数のテストクラス"""
 
     def test_setup_logging(self, tmp_path, monkeypatch):
         """ロギング設定のテスト"""
-        # LOG_LEVELを設定
         monkeypatch.setenv("LOG_LEVEL", "DEBUG")
         monkeypatch.chdir(tmp_path)
-
-        # ロギングをリセット
         logging.getLogger().handlers = []
 
         setup_logging()
 
-        # ログレベルがDEBUGに設定されているか確認
         assert logging.getLogger().level == logging.DEBUG
-
-        # ログディレクトリが作成されているか確認
-        log_dir = tmp_path / "logs"
-        assert log_dir.exists()
+        assert (tmp_path / "logs").exists()
 
     def test_discover_chromecasts_found(self):
         """Chromecast検索のテスト（デバイスが見つかった場合）"""
         mock_cast = Mock()
         mock_cast.cast_info.friendly_name = "TestDevice"
-        
         mock_browser = Mock()
-        
+
         with patch("pychromecast.get_chromecasts", return_value=([mock_cast], mock_browser)):
             cast, browser = discover_chromecasts("TestDevice")
-            
-            assert cast == mock_cast
-            assert browser == mock_browser
+
+        assert cast == mock_cast
+        assert browser == mock_browser
 
     def test_discover_chromecasts_not_found(self):
         """Chromecast検索のテスト（デバイスが見つからない場合）"""
         mock_cast = Mock()
         mock_cast.cast_info.friendly_name = "OtherDevice"
-        
         mock_browser = Mock()
-        
+
         with patch("pychromecast.get_chromecasts", return_value=([mock_cast], mock_browser)):
             cast, browser = discover_chromecasts("TestDevice")
-            
-            assert cast is None
-            assert browser == mock_browser
 
-    def test_log_chromecast_status_active(self, caplog):
-        """Chromecast状態ログのテスト（アクティブ状態）"""
+        assert cast is None
+        assert browser == mock_browser
+
+    def test_stop_discovery_prefers_browser_method(self):
+        """browser.stop_discovery があればそれを使う"""
+        mock_browser = Mock()
+
+        stop_discovery(mock_browser)
+
+        mock_browser.stop_discovery.assert_called_once()
+
+    def test_load_state_round_trip(self, tmp_path):
+        """state の保存と読込"""
+        state_file = tmp_path / "state.json"
+        state = create_initial_state("Living Room", 0.55, 1234.0)
+
+        save_state(state_file, state)
+        loaded = load_state(state_file)
+
+        assert loaded == state
+
+    def test_load_state_missing(self, tmp_path):
+        """state がなければ None"""
+        assert load_state(tmp_path / "missing.json") is None
+
+    def test_load_state_invalid_json_raises(self, tmp_path):
+        """壊れた JSON は fail fast"""
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{broken", encoding="utf-8")
+
+        with pytest.raises(RuntimeError):
+            load_state(state_file)
+
+    def test_clear_state(self, tmp_path):
+        """state ファイル削除"""
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{}", encoding="utf-8")
+
+        clear_state(state_file)
+
+        assert not state_file.exists()
+
+    def test_is_state_stale_with_old_timestamp(self):
+        """古い state はリセット対象"""
+        state = create_initial_state("Living Room", 0.4, 100.0)
+        assert is_state_stale(state, "Living Room", interval_sec=30, now_ts=200.0) is True
+
+    def test_is_state_stale_with_different_device(self):
+        """別デバイスの state はリセット対象"""
+        state = create_initial_state("Bedroom", 0.4, 100.0)
+        assert is_state_stale(state, "Living Room", interval_sec=30, now_ts=120.0) is True
+
+    def test_detect_manual_activity(self):
+        """前回自動設定音量より上がっていれば手動操作扱い"""
+        assert detect_manual_activity(0.55, 0.5, 0.01) is True
+        assert detect_manual_activity(0.5, 0.5, 0.01) is False
+        assert detect_manual_activity(0.49, 0.5, 0.01) is False
+        assert detect_manual_activity(0.505, 0.5, 0.01) is False
+
+    def test_append_history_keeps_latest_entries(self):
+        """履歴は最大件数まで保持する"""
+        state = {"history": []}
+
+        for i in range(25):
+            append_history(state, {"index": i})
+
+        assert len(state["history"]) == 20
+        assert state["history"][0]["index"] == 5
+        assert state["history"][-1]["index"] == 24
+
+    def test_calculate_next_volume(self):
+        """音量計算のテスト"""
+        assert calculate_next_volume(0.6, -0.04, 0.3) == 0.56
+        assert calculate_next_volume(0.31, -0.04, 0.3) == 0.3
+        assert calculate_next_volume(0.2, -0.04, 0.3) == 0.2
+
+    def test_standby_device(self):
+        """スタンバイ移行のテスト"""
         mock_cast = Mock()
-        mock_cast.status.app_id = "SomeApp"
-        mock_cast.media_controller.status.player_state = "PLAYING"
-        
-        with caplog.at_level(logging.INFO):
-            log_chromecast_status(mock_cast)
-            
-        assert "Chromecast状態: アクティブ" in caplog.text
-        assert "メディア状態: PLAYING" in caplog.text
 
-    def test_log_chromecast_status_idle(self, caplog):
-        """Chromecast状態ログのテスト（アイドル状態）"""
-        mock_cast = Mock()
-        mock_cast.status.app_id = None
-        
-        with caplog.at_level(logging.INFO):
-            log_chromecast_status(mock_cast)
-            
-        assert "Chromecast状態: アイドル" in caplog.text
+        with patch("nemucast.main.time.sleep") as mock_sleep:
+            standby_device(mock_cast)
 
-    def test_log_active_app_status(self, caplog):
-        """アクティブアプリ状態ログのテスト"""
-        mock_cast = Mock()
-        mock_cast.media_controller.status.player_state = "PAUSED"
-        
-        with caplog.at_level(logging.INFO):
-            log_active_app_status(mock_cast)
-            
-        assert "再生状態: PAUSED" in caplog.text
-
-    def test_is_chromecast_active_with_app(self):
-        """Chromecastアクティブ判定のテスト（アプリ起動中）"""
-        mock_cast = Mock()
-        mock_cast.status.app_id = "AndroidNativeApp"
-        mock_cast.status.is_active_input = True
-        mock_cast.status.is_stand_by = False
-        
-        assert is_chromecast_active(mock_cast) == True
-
-    def test_is_chromecast_active_idle(self):
-        """Chromecastアクティブ判定のテスト（アイドル状態）"""
-        mock_cast = Mock()
-        mock_cast.status.app_id = None
-        
-        assert is_chromecast_active(mock_cast) == False
-
-    def test_is_chromecast_active_backdrop(self):
-        """Chromecastアクティブ判定のテスト（Backdrop表示中）"""
-        mock_cast = Mock()
-        mock_cast.status.app_id = "E8C28D3C"
-        
-        assert is_chromecast_active(mock_cast) == False
-
-    def test_get_initial_volume(self):
-        """初期音量取得のテスト"""
-        mock_cast = Mock()
-        mock_cast.status.volume_level = 0.75
-
-        volume = get_initial_volume(mock_cast)
-
-        assert volume == 0.75
-
-    def test_get_initial_volume_none(self, caplog):
-        """初期音量取得のテスト（取得失敗時）"""
-        mock_cast = Mock()
-        mock_cast.status.volume_level = None
-        
-        with caplog.at_level(logging.WARNING):
-            volume = get_initial_volume(mock_cast)
-            
-        assert volume == 0.5
-        assert "起動時の音量を取得できませんでした" in caplog.text
-
-    def test_adjust_volume_normal(self):
-        """音量調整のテスト（通常）"""
-        mock_cast = Mock()
-        
-        new_volume = adjust_volume(mock_cast, 0.6, -0.04, 0.4)
-        
-        assert new_volume == 0.56
-        mock_cast.set_volume.assert_called_once_with(0.56)
-
-    def test_adjust_volume_min_reached(self):
-        """音量調整のテスト（最小値到達）"""
-        mock_cast = Mock()
-        
-        new_volume = adjust_volume(mock_cast, 0.4, -0.04, 0.4)
-        
-        assert new_volume is None
-
-    def test_restore_volume_and_standby_active(self):
-        """音量復元とスタンバイのテスト（アクティブ状態）"""
-        mock_cast = Mock()
-        
-        with patch("nemucast.main.is_chromecast_active", return_value=True):
-            restore_volume_and_standby(mock_cast, 0.7)
-            
-        mock_cast.set_volume.assert_called_once_with(0.7)
         mock_cast.quit_app.assert_called_once()
+        mock_sleep.assert_called_once_with(2)
 
-    def test_restore_volume_and_standby_already_idle(self):
-        """音量復元とスタンバイのテスト（既にアイドル状態）"""
+    def test_run_volume_tick_detects_manual_raise_and_resets_streak(self, tmp_path):
+        """手動で音量が上がっていれば streak をリセットして継続"""
+        state_file = tmp_path / "state.json"
+        save_state(
+            state_file,
+            {
+                "device_name": "Living Room",
+                "last_auto_volume": 0.4,
+                "inactive_streak": 2,
+                "updated_at": 100.0,
+                "history": [],
+            },
+        )
         mock_cast = Mock()
+        mock_cast.status.volume_level = 0.5
 
-        with patch("nemucast.main.is_chromecast_active", return_value=False):
-            restore_volume_and_standby(mock_cast, 0.7)
-
-        mock_cast.set_volume.assert_called_once_with(0.7)
-        mock_cast.quit_app.assert_not_called()
-
-    def test_wait_for_active_immediately_active(self):
-        """wait_for_activeのテスト（最初からアクティブ）"""
-        mock_cast = Mock()
-
-        with patch("nemucast.main.is_chromecast_active", return_value=True):
-            result = wait_for_active(mock_cast, timeout_sec=300, poll_interval=60)
-
-        assert result is True
-
-    def test_wait_for_active_becomes_active(self):
-        """wait_for_activeのテスト（3回目のポーリングでアクティブ）"""
-        mock_cast = Mock()
-
-        with patch("nemucast.main.is_chromecast_active", side_effect=[False, False, True]), \
-             patch("nemucast.main.time.sleep") as mock_sleep:
-            result = wait_for_active(mock_cast, timeout_sec=300, poll_interval=60)
-
-        assert result is True
-        assert mock_sleep.call_count == 2
-
-    def test_wait_for_active_timeout(self):
-        """wait_for_activeのテスト（タイムアウト）"""
-        mock_cast = Mock()
-
-        with patch("nemucast.main.is_chromecast_active", return_value=False), \
-             patch("nemucast.main.time.sleep"):
-            result = wait_for_active(mock_cast, timeout_sec=120, poll_interval=60)
-
-        assert result is False
-
-    def test_volume_control_loop_idle_exit(self):
-        """volume_control_loopのテスト（アイドルに戻った時に終了）"""
-        mock_cast = Mock()
-
-        with patch("nemucast.main.is_chromecast_active", return_value=False), \
-             patch("nemucast.main.restore_volume_and_standby") as mock_restore:
-            volume_control_loop(
-                mock_cast, interval_sec=60, step=-0.04,
-                min_level=0.3, initial_volume=0.7,
+        with patch("nemucast.main.time.time", return_value=110.0):
+            result = run_volume_tick(
+                cast=mock_cast,
+                interval_sec=60,
+                step=-0.04,
+                min_level=0.3,
+                inactive_threshold=3,
+                manual_rise_threshold=0.01,
+                state_file=state_file,
+                device_name="Living Room",
             )
 
-        mock_restore.assert_called_once_with(mock_cast, 0.7)
+        saved = load_state(state_file)
+        assert result == "volume_down"
+        assert saved["inactive_streak"] == 0
+        assert saved["last_auto_volume"] == 0.46
+        assert saved["history"][-1]["manual_raise_detected"] is True
+        mock_cast.set_volume.assert_called_once_with(0.46)
+
+    def test_run_volume_tick_reaches_inactive_threshold_and_standby(self, tmp_path):
+        """しきい値に達したら state を消して standby"""
+        state_file = tmp_path / "state.json"
+        save_state(
+            state_file,
+            {
+                "device_name": "Living Room",
+                "last_auto_volume": 0.4,
+                "inactive_streak": 2,
+                "updated_at": 100.0,
+                "history": [],
+            },
+        )
+        mock_cast = Mock()
+        mock_cast.status.volume_level = 0.4
+
+        with patch("nemucast.main.time.time", return_value=110.0), patch(
+            "nemucast.main.time.sleep"
+        ):
+            result = run_volume_tick(
+                cast=mock_cast,
+                interval_sec=60,
+                step=-0.04,
+                min_level=0.3,
+                inactive_threshold=3,
+                manual_rise_threshold=0.01,
+                state_file=state_file,
+                device_name="Living Room",
+            )
+
+        assert result == "standby"
+        assert not state_file.exists()
+        mock_cast.quit_app.assert_called_once()
+        mock_cast.set_volume.assert_not_called()
+
+    def test_run_volume_tick_resets_stale_state(self, tmp_path):
+        """古い state は新しいセッションとして扱う"""
+        state_file = tmp_path / "state.json"
+        save_state(
+            state_file,
+            {
+                "device_name": "Living Room",
+                "last_auto_volume": 0.7,
+                "inactive_streak": 5,
+                "updated_at": 0.0,
+                "history": [],
+            },
+        )
+        mock_cast = Mock()
+        mock_cast.status.volume_level = 0.6
+
+        with patch("nemucast.main.time.time", return_value=200.0):
+            result = run_volume_tick(
+                cast=mock_cast,
+                interval_sec=60,
+                step=-0.04,
+                min_level=0.3,
+                inactive_threshold=3,
+                manual_rise_threshold=0.01,
+                state_file=state_file,
+                device_name="Living Room",
+            )
+
+        saved = load_state(state_file)
+        assert result == "volume_down"
+        assert saved["inactive_streak"] == 1
+        assert saved["last_auto_volume"] == 0.56
+
+    def test_run_volume_tick_keeps_volume_when_at_min_level(self, tmp_path):
+        """最小音量以下なら据え置きで state だけ進める"""
+        state_file = tmp_path / "state.json"
+        mock_cast = Mock()
+        mock_cast.status.volume_level = 0.25
+
+        with patch("nemucast.main.time.time", return_value=100.0):
+            result = run_volume_tick(
+                cast=mock_cast,
+                interval_sec=60,
+                step=-0.04,
+                min_level=0.3,
+                inactive_threshold=3,
+                manual_rise_threshold=0.01,
+                state_file=state_file,
+                device_name="Living Room",
+            )
+
+        saved = load_state(state_file)
+        assert result == "keep"
+        assert saved["inactive_streak"] == 1
+        assert saved["last_auto_volume"] == 0.25
+        mock_cast.set_volume.assert_not_called()
+
+    def test_state_file_is_json_serializable(self, tmp_path):
+        """保存される state は JSON として読める"""
+        state_file = tmp_path / "state.json"
+        state = create_initial_state("Living Room", 0.55, 1234.0)
+        append_history(state, {"action": "volume_down", "applied_volume": 0.51})
+
+        save_state(state_file, state)
+        loaded = json.loads(state_file.read_text(encoding="utf-8"))
+
+        assert loaded["device_name"] == "Living Room"
+        assert loaded["history"][0]["action"] == "volume_down"
+
+    def test_run_volume_session_one_shot(self):
+        """1回実行モードでは sleep せずに1回だけ tick する"""
+        mock_cast = Mock()
+
+        with patch("nemucast.main.run_volume_tick", return_value="volume_down") as mock_tick, patch(
+            "nemucast.main.time.sleep"
+        ) as mock_sleep:
+            result = run_volume_session(
+                cast=mock_cast,
+                interval_sec=900,
+                step=-0.04,
+                min_level=0.3,
+                inactive_threshold=4,
+                manual_rise_threshold=0.01,
+                state_file=Path("logs/state.json"),
+                device_name="Living Room",
+                run_until_standby=False,
+            )
+
+        assert result == "volume_down"
+        assert mock_tick.call_count == 1
+        mock_sleep.assert_not_called()
+
+    def test_run_volume_session_until_standby(self):
+        """standby 到達まで interval ごとに繰り返す"""
+        mock_cast = Mock()
+
+        with patch(
+            "nemucast.main.run_volume_tick",
+            side_effect=["volume_down", "keep", "standby"],
+        ) as mock_tick, patch("nemucast.main.time.sleep") as mock_sleep:
+            result = run_volume_session(
+                cast=mock_cast,
+                interval_sec=900,
+                step=-0.04,
+                min_level=0.35,
+                inactive_threshold=4,
+                manual_rise_threshold=0.01,
+                state_file=Path("logs/activity_state_0030.json"),
+                device_name="Dell",
+                run_until_standby=True,
+            )
+
+        assert result == "standby"
+        assert mock_tick.call_count == 3
+        assert mock_sleep.call_count == 2
+        mock_sleep.assert_called_with(900)
+
+    @pytest.mark.parametrize(
+        ("profile_name", "expected"),
+        [
+            (
+                "cron-20",
+                {
+                    "name": "Dell",
+                    "interval": 60,
+                    "inactive_threshold": 1,
+                    "state_file": "logs/activity_state_20.json",
+                    "run_until_standby": True,
+                },
+            ),
+            (
+                "cron-0030",
+                {
+                    "name": "Dell",
+                    "interval": 900,
+                    "inactive_threshold": 4,
+                    "state_file": "logs/activity_state_0030.json",
+                    "run_until_standby": True,
+                },
+            ),
+        ],
+    )
+    def test_build_schedule_defaults(self, profile_name, expected):
+        """スケジュール別プロファイルの既定値"""
+        defaults = build_schedule_defaults(profile_name)
+
+        for key, value in expected.items():
+            assert defaults[key] == value

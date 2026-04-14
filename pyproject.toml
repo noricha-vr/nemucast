@@ -19,6 +19,8 @@ package = true
 
 [project.scripts]
 nemucast = "nemucast.main:main"
+nemucast-cron-20 = "nemucast.main:main_cron_20"
+nemucast-cron-0030 = "nemucast.main:main_cron_0030"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

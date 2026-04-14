@@ -1,89 +1,74 @@
-"""音量制御ロジックのテスト"""
+"""main 周辺のテスト"""
+
+from unittest.mock import Mock, patch
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
-import sys
-import os
+
+from nemucast.main import main, main_cron_0030, main_cron_20
 
 
-class TestVolumeControl:
-    """音量制御のテストクラス"""
+class TestMainFlow:
+    """main のテストクラス"""
 
-    def test_volume_calculation_step_down(self):
-        """音量を段階的に下げる計算のテスト"""
-        current = 0.5
-        step = -0.04
-        min_level = 0.4
-        
-        # 正常な音量下げ計算
-        expected = max(min_level - 1, round(current + step, 2))
-        assert expected == 0.46
-        
-        # 最小値に近い場合
-        current = 0.42
-        expected = max(min_level - 1, round(current + step, 2))
-        assert expected == 0.38
+    @patch("pychromecast.get_chromecasts")
+    def test_main_exits_when_chromecast_missing(self, mock_get_chromecasts):
+        """Chromecastが見つからない場合は終了コード1"""
+        mock_browser = Mock()
+        mock_get_chromecasts.return_value = ([], mock_browser)
 
-    def test_min_volume_detection(self):
-        """最小音量の検出テスト"""
-        min_level = 0.4
-        
-        # 最小値以下
-        assert 0.39 <= min_level
-        assert 0.4 <= min_level
-        
-        # 最小値より大きい
-        assert not (0.41 <= min_level)
-        assert not (0.5 <= min_level)
-
-    @patch('pychromecast.get_chromecasts')
-    def test_chromecast_discovery_no_devices(self, mock_get_chromecasts):
-        """Chromecastが見つからない場合のテスト"""
-        mock_get_chromecasts.return_value = ([], Mock())
-        
-        from nemucast.main import main
-        
         with pytest.raises(SystemExit) as exc_info:
-            with patch('sys.argv', ['nemucast']):
+            with patch("sys.argv", ["nemucast"]):
                 main()
-        
+
         assert exc_info.value.code == 1
+        mock_browser.stop_discovery.assert_called_once()
 
-    def test_environment_variable_defaults(self):
-        """環境変数のデフォルト値テスト"""
-        # 環境変数をクリア
-        env_vars = ['CHROMECAST_NAME', 'STEP', 'MIN_LEVEL', 'INTERVAL_SEC']
-        original_values = {}
-        for var in env_vars:
-            original_values[var] = os.environ.get(var)
-            if var in os.environ:
-                del os.environ[var]
-        
-        try:
-            # モジュールを再インポートして環境変数を再読み込み
-            if 'nemucast.main' in sys.modules:
-                del sys.modules['nemucast.main']
-            
-            from nemucast.main import (
-                CHROMECAST_NAME, STEP, MIN_LEVEL, 
-                DEFAULT_INTERVAL_SEC
-            )
-            
-            assert CHROMECAST_NAME == "Dell"
-            assert STEP == -0.04
-            assert MIN_LEVEL == 0.4
-            assert DEFAULT_INTERVAL_SEC == 1200
-        
-        finally:
-            # 環境変数を復元
-            for var, value in original_values.items():
-                if value is not None:
-                    os.environ[var] = value
+    @patch("nemucast.main.run_volume_session", side_effect=RuntimeError("boom"))
+    @patch("pychromecast.get_chromecasts")
+    def test_main_clears_state_when_tick_fails(
+        self,
+        mock_get_chromecasts,
+        mock_run_volume_session,
+        tmp_path,
+    ):
+        """tick失敗時は state を削除して終了"""
+        state_file = tmp_path / "activity_state.json"
+        state_file.write_text("{}", encoding="utf-8")
 
-    def test_volume_rounding(self):
-        """音量の丸め処理テスト"""
-        # 小数点2桁に丸められることを確認
-        assert round(0.444, 2) == 0.44
-        assert round(0.445, 2) == 0.45  # Python3のround仕様
-        assert round(0.446, 2) == 0.45
-        assert round(0.999, 2) == 1.0
+        mock_cast = Mock()
+        mock_cast.cast_info.friendly_name = "Living Room"
+        mock_cast.cast_info.host = "192.168.1.2"
+        mock_browser = Mock()
+        mock_get_chromecasts.return_value = ([mock_cast], mock_browser)
+
+        with pytest.raises(SystemExit) as exc_info:
+            with patch(
+                "sys.argv",
+                ["nemucast", "--name", "Living Room", "--state-file", str(state_file)],
+            ):
+                main()
+
+        assert exc_info.value.code == 1
+        assert not state_file.exists()
+        mock_cast.wait.assert_called_once()
+        mock_run_volume_session.assert_called_once()
+
+    @patch("nemucast.main.run_with_args")
+    def test_main_cron_20_uses_schedule_defaults(self, mock_run_with_args):
+        """20時プロファイルを使う"""
+        main_cron_20()
+
+        overrides = mock_run_with_args.call_args.kwargs["default_overrides"]
+        assert overrides["interval"] == 60
+        assert overrides["inactive_threshold"] == 1
+        assert overrides["run_until_standby"] is True
+
+    @patch("nemucast.main.run_with_args")
+    def test_main_cron_0030_uses_schedule_defaults(self, mock_run_with_args):
+        """00:30プロファイルを使う"""
+        main_cron_0030()
+
+        overrides = mock_run_with_args.call_args.kwargs["default_overrides"]
+        assert overrides["interval"] == 900
+        assert overrides["inactive_threshold"] == 4
+        assert overrides["run_until_standby"] is True
