@@ -11,3 +11,10 @@ wheels/
 
 # Environment variables
 .env
+
+# macOS metadata
+.DS_Store
+
+# Runtime logs and state
+logs/
+src/nemucast/logs/
