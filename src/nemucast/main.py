@@ -59,8 +59,7 @@ def parse_args(args=None, default_overrides: dict[str, Any] | None = None):
         type=int,
         default=overrides.get("interval", DEFAULT_INTERVAL_SEC),
         help=(
-            "定期実行の間隔（秒）。デフォルト: "
-            f"{overrides.get('interval', DEFAULT_INTERVAL_SEC)}秒"
+            f"定期実行の間隔（秒）。デフォルト: {overrides.get('interval', DEFAULT_INTERVAL_SEC)}秒"
         ),
     )
     parser.add_argument(
@@ -75,20 +74,14 @@ def parse_args(args=None, default_overrides: dict[str, Any] | None = None):
         "--step",
         type=float,
         default=overrides.get("step", STEP),
-        help=(
-            "音量調整のステップ（負の値）。デフォルト: "
-            f"{overrides.get('step', STEP)}"
-        ),
+        help=(f"音量調整のステップ（負の値）。デフォルト: {overrides.get('step', STEP)}"),
     )
     parser.add_argument(
         "-m",
         "--min-level",
         type=float,
         default=overrides.get("min_level", MIN_LEVEL),
-        help=(
-            "最小音量レベル。デフォルト: "
-            f"{overrides.get('min_level', MIN_LEVEL)}"
-        ),
+        help=(f"最小音量レベル。デフォルト: {overrides.get('min_level', MIN_LEVEL)}"),
     )
     parser.add_argument(
         "--inactive-threshold",

@@ -118,3 +118,19 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 uv run pytest -q
 uv run ruff check
 ```
+
+## 🪝 pre-commit フック
+
+コミット前に `ruff check` と `ruff format --check` が自動で走るよう pre-commit フックを用意しています。
+初回セットアップ時に以下を実行してください。
+
+```bash
+uv sync --all-groups
+uv run pre-commit install
+```
+
+手動で全ファイルに対して実行する場合:
+
+```bash
+uv run pre-commit run --all-files
+```

@@ -201,8 +201,9 @@ class TestRefactoredFunctions:
         mock_cast = Mock()
         mock_cast.status.volume_level = 0.4
 
-        with patch("nemucast.main.time.time", return_value=110.0), patch(
-            "nemucast.main.time.sleep"
+        with (
+            patch("nemucast.main.time.time", return_value=110.0),
+            patch("nemucast.main.time.sleep"),
         ):
             result = run_volume_tick(
                 cast=mock_cast,
@@ -293,9 +294,10 @@ class TestRefactoredFunctions:
         """1回実行モードでは sleep せずに1回だけ tick する"""
         mock_cast = Mock()
 
-        with patch("nemucast.main.run_volume_tick", return_value="volume_down") as mock_tick, patch(
-            "nemucast.main.time.sleep"
-        ) as mock_sleep:
+        with (
+            patch("nemucast.main.run_volume_tick", return_value="volume_down") as mock_tick,
+            patch("nemucast.main.time.sleep") as mock_sleep,
+        ):
             result = run_volume_session(
                 cast=mock_cast,
                 interval_sec=900,
@@ -316,10 +318,13 @@ class TestRefactoredFunctions:
         """standby 到達まで interval ごとに繰り返す"""
         mock_cast = Mock()
 
-        with patch(
-            "nemucast.main.run_volume_tick",
-            side_effect=["volume_down", "keep", "standby"],
-        ) as mock_tick, patch("nemucast.main.time.sleep") as mock_sleep:
+        with (
+            patch(
+                "nemucast.main.run_volume_tick",
+                side_effect=["volume_down", "keep", "standby"],
+            ) as mock_tick,
+            patch("nemucast.main.time.sleep") as mock_sleep,
+        ):
             result = run_volume_session(
                 cast=mock_cast,
                 interval_sec=900,
