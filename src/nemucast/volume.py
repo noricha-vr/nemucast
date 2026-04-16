@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,33 @@ from nemucast.state import (
     load_state,
     save_state,
 )
+
+
+@dataclass(frozen=True)
+class VolumeSessionConfig:
+    """``run_volume_session`` に渡す設定値をまとめたデータクラス。
+
+    パラメータ爆発を避けつつ、不変性を担保するため ``frozen=True`` にしている。
+
+    Attributes:
+        interval_sec: 定期実行の間隔（秒）。
+        step: 1 tick ごとの音量調整ステップ（負の値）。
+        min_level: 最小音量レベル（0.0〜1.0）。
+        inactive_threshold: standby 判定までの連続非アクティブ回数。
+        manual_rise_threshold: 手動で音量が上げられたと判定する最小差分。
+        state_file: 活動判定 state JSON の保存先。
+        device_name: 対象の Chromecast 名。
+        run_until_standby: True なら standby 到達まで繰り返し実行する。
+    """
+
+    interval_sec: int
+    step: float
+    min_level: float
+    inactive_threshold: int
+    manual_rise_threshold: float
+    state_file: Path
+    device_name: str
+    run_until_standby: bool
 
 
 class TickResult(str, Enum):
@@ -223,28 +251,21 @@ def run_volume_tick(
 
 def run_volume_session(
     cast: pychromecast.Chromecast,
-    interval_sec: int,
-    step: float,
-    min_level: float,
-    inactive_threshold: int,
-    manual_rise_threshold: float,
-    state_file: Path,
-    device_name: str,
-    run_until_standby: bool,
+    config: VolumeSessionConfig,
 ) -> TickResult:
     """1回または standby 到達までの連続セッションを実行する"""
     while True:
         result = run_volume_tick(
             cast=cast,
-            interval_sec=interval_sec,
-            step=step,
-            min_level=min_level,
-            inactive_threshold=inactive_threshold,
-            manual_rise_threshold=manual_rise_threshold,
-            state_file=state_file,
-            device_name=device_name,
+            interval_sec=config.interval_sec,
+            step=config.step,
+            min_level=config.min_level,
+            inactive_threshold=config.inactive_threshold,
+            manual_rise_threshold=config.manual_rise_threshold,
+            state_file=config.state_file,
+            device_name=config.device_name,
         )
-        if not run_until_standby or result == TickResult.STANDBY:
+        if not config.run_until_standby or result == TickResult.STANDBY:
             return result
-        logging.info("次の判定まで %d 秒待機します。", interval_sec)
-        time.sleep(interval_sec)
+        logging.info("次の判定まで %d 秒待機します。", config.interval_sec)
+        time.sleep(config.interval_sec)
