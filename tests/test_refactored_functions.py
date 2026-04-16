@@ -27,7 +27,9 @@ from nemucast.state import (  # noqa: E402
     save_state,
 )
 from nemucast.volume import (  # noqa: E402
+    TickResult,
     calculate_next_volume,
+    lower_volume_once,
     run_volume_session,
     run_volume_tick,
 )
@@ -143,6 +145,54 @@ class TestRefactoredFunctions:
         assert calculate_next_volume(0.6, -0.04, 0.3) == 0.56
         assert calculate_next_volume(0.31, -0.04, 0.3) == 0.3
         assert calculate_next_volume(0.2, -0.04, 0.3) == 0.2
+
+    def test_lower_volume_once_applies_next_volume(self):
+        """通常ケースでは set_volume が呼ばれて戻り値が更新される"""
+        mock_cast = Mock()
+
+        result = lower_volume_once(
+            cast=mock_cast,
+            current_volume=0.5,
+            step=-0.1,
+            min_level=0.1,
+        )
+
+        assert result == 0.4
+        mock_cast.set_volume.assert_called_once_with(0.4)
+
+    def test_lower_volume_once_clamps_to_min_level(self):
+        """min_level 未満にはならない"""
+        mock_cast = Mock()
+
+        result = lower_volume_once(
+            cast=mock_cast,
+            current_volume=0.15,
+            step=-0.1,
+            min_level=0.1,
+        )
+
+        assert result == 0.1
+        mock_cast.set_volume.assert_called_once_with(0.1)
+
+    def test_lower_volume_once_skips_set_volume_when_at_min_level(self):
+        """既に最小音量なら set_volume は呼ばれない"""
+        mock_cast = Mock()
+
+        result = lower_volume_once(
+            cast=mock_cast,
+            current_volume=0.1,
+            step=-0.1,
+            min_level=0.1,
+        )
+
+        assert result == 0.1
+        mock_cast.set_volume.assert_not_called()
+
+    def test_tick_result_is_str_compatible(self):
+        """TickResult は文字列としても比較できる（後方互換）"""
+        assert TickResult.STANDBY == "standby"
+        assert TickResult.VOLUME_DOWN == "volume_down"
+        assert TickResult.KEEP == "keep"
 
     def test_standby_device(self):
         """スタンバイ移行のテスト"""
