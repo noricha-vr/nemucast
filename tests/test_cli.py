@@ -1,4 +1,4 @@
-"""cli モジュール（ロギング設定 / スケジュールプロファイル / config 定数）のテスト"""
+"""cli モジュール（ロギング設定 / cron プロファイル / config 定数）のテスト"""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ from unittest.mock import Mock, patch
 import pytest
 
 from nemucast import config as config_module
-from nemucast.cli import build_schedule_defaults, run_with_args, setup_logging
+from nemucast.cli import run_with_args, setup_logging
+from nemucast.volume import VolumeSessionConfig
 
 
 def test_setup_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -24,68 +25,22 @@ def test_setup_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert (tmp_path / "logs").exists()
 
 
-@pytest.mark.parametrize(
-    ("profile_name", "expected"),
-    [
-        (
-            "cron-20",
-            {
-                "name": "Dell",
-                "interval": 60,
-                "inactive_threshold": 1,
-                "state_file": "logs/activity_state_20.json",
-                "run_until_standby": True,
-            },
-        ),
-        (
-            "cron-0030",
-            {
-                "name": "Dell",
-                "interval": 900,
-                "inactive_threshold": 4,
-                "state_file": "logs/activity_state_0030.json",
-                "run_until_standby": True,
-            },
-        ),
-    ],
-)
-def test_build_schedule_defaults(profile_name: str, expected: dict) -> None:
-    """スケジュール別プロファイルの既定値"""
-    defaults = build_schedule_defaults(profile_name)
-
-    for key, value in expected.items():
-        assert defaults[key] == value
+def test_cron_20_overrides_defaults() -> None:
+    """cron-20 プロファイルの既定値"""
+    assert config_module.CRON_20_OVERRIDES["name"] == "Dell"
+    assert config_module.CRON_20_OVERRIDES["interval"] == 60
+    assert config_module.CRON_20_OVERRIDES["inactive_threshold"] == 1
+    assert config_module.CRON_20_OVERRIDES["state_file"] == "logs/activity_state_20.json"
+    assert config_module.CRON_20_OVERRIDES["run_until_standby"] is True
 
 
-def test_build_schedule_defaults_unknown_profile() -> None:
-    """未知のプロファイル名は ValueError"""
-    with pytest.raises(ValueError, match="未知のスケジュールプロファイル"):
-        build_schedule_defaults("unknown-profile")
-
-
-def test_build_schedule_defaults_returns_independent_copy() -> None:
-    """返り値を変更しても SCHEDULE_PROFILES 側は汚染されない"""
-    defaults = build_schedule_defaults("cron-20")
-    defaults["interval"] = -1
-
-    assert config_module.SCHEDULE_PROFILES["cron-20"]["interval"] != -1
-
-
-def test_schedule_profiles_contains_expected_keys() -> None:
-    """SCHEDULE_PROFILES には既知のプロファイルと必要なキーが揃っている"""
-    required_keys = {
-        "name",
-        "interval",
-        "step",
-        "min_level",
-        "inactive_threshold",
-        "state_file",
-        "run_until_standby",
-    }
-
-    assert set(config_module.SCHEDULE_PROFILES.keys()) == {"cron-20", "cron-0030"}
-    for profile in config_module.SCHEDULE_PROFILES.values():
-        assert required_keys <= set(profile.keys())
+def test_cron_0030_overrides_defaults() -> None:
+    """cron-0030 プロファイルの既定値"""
+    assert config_module.CRON_0030_OVERRIDES["name"] == "Dell"
+    assert config_module.CRON_0030_OVERRIDES["interval"] == 900
+    assert config_module.CRON_0030_OVERRIDES["inactive_threshold"] == 4
+    assert config_module.CRON_0030_OVERRIDES["state_file"] == "logs/activity_state_0030.json"
+    assert config_module.CRON_0030_OVERRIDES["run_until_standby"] is True
 
 
 def test_log_dir_default() -> None:
@@ -108,7 +63,7 @@ class TestRunWithArgs:
     """run_with_args の主要パスのテスト"""
 
     @patch("nemucast.cli.stop_discovery")
-    @patch("nemucast.cli.run_volume_session", return_value="volume_down")
+    @patch("nemucast.cli.run_volume_session")
     @patch("nemucast.cli.discover_chromecasts")
     def test_run_with_args_happy_path(
         self,
@@ -126,12 +81,40 @@ class TestRunWithArgs:
 
         state_file = tmp_path / "activity_state.json"
         run_with_args(
-            args=["--name", "Living Room", "--state-file", str(state_file)],
+            args=[
+                "--name",
+                "Living Room",
+                "--state-file",
+                str(state_file),
+                "--interval",
+                "600",
+                "--step",
+                "-0.05",
+                "--min-level",
+                "0.2",
+                "--inactive-threshold",
+                "4",
+                "--manual-rise-threshold",
+                "0.03",
+                "--run-until-standby",
+            ],
         )
 
         mock_cast.wait.assert_called_once()
         mock_run_session.assert_called_once()
         mock_stop_discovery.assert_called_once_with(mock_browser)
+
+        # 解析された引数が VolumeSessionConfig に正しくマップされる
+        config = mock_run_session.call_args.kwargs["config"]
+        assert isinstance(config, VolumeSessionConfig)
+        assert config.interval_sec == 600
+        assert config.device_name == "Living Room"
+        assert config.step == -0.05
+        assert config.min_level == 0.2
+        assert config.inactive_threshold == 4
+        assert config.manual_rise_threshold == 0.03
+        assert config.state_file == state_file
+        assert config.run_until_standby is True
 
     @patch("nemucast.cli.stop_discovery")
     @patch("nemucast.cli.discover_chromecasts")

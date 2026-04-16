@@ -26,26 +26,25 @@ DEFAULT_STATE_FILE = os.getenv("STATE_FILE", f"{LOG_DIR}/activity_state.json")
 RUN_UNTIL_STANDBY = os.getenv("RUN_UNTIL_STANDBY", "0") == "1"
 STATE_STALE_INTERVAL_MULTIPLIER = int(os.getenv("STATE_STALE_INTERVAL_MULTIPLIER", "2"))
 
-# スケジュール別プロファイル。CLI からは SCHEDULE_PROFILES[profile_name] を参照する。
-SCHEDULE_PROFILES: dict[str, dict[str, Any]] = {
-    "cron-20": {
-        "name": os.getenv("CRON_20_NAME", CHROMECAST_NAME),
-        "interval": int(os.getenv("CRON_20_INTERVAL_SEC", "60")),
-        "step": float(os.getenv("CRON_20_STEP", str(STEP))),
-        "min_level": float(os.getenv("CRON_20_MIN_LEVEL", "0.05")),
-        "inactive_threshold": int(os.getenv("CRON_20_INACTIVE_THRESHOLD", "1")),
-        "state_file": os.getenv("CRON_20_STATE_FILE", f"{LOG_DIR}/activity_state_20.json"),
-        "run_until_standby": True,
-    },
-    "cron-0030": {
-        "name": os.getenv("CRON_0030_NAME", CHROMECAST_NAME),
-        "interval": int(os.getenv("CRON_0030_INTERVAL_SEC", "900")),
-        "step": float(os.getenv("CRON_0030_STEP", str(STEP))),
-        "min_level": float(os.getenv("CRON_0030_MIN_LEVEL", "0.35")),
-        "inactive_threshold": int(os.getenv("CRON_0030_INACTIVE_THRESHOLD", "4")),
-        "state_file": os.getenv("CRON_0030_STATE_FILE", f"{LOG_DIR}/activity_state_0030.json"),
-        "run_until_standby": True,
-    },
+# cron 起動用プロファイルの上書き値。CLI の default_overrides にそのまま渡す。
+CRON_20_OVERRIDES: dict[str, Any] = {
+    "name": os.getenv("CRON_20_NAME", CHROMECAST_NAME),
+    "interval": int(os.getenv("CRON_20_INTERVAL_SEC", "60")),
+    "step": float(os.getenv("CRON_20_STEP", str(STEP))),
+    "min_level": float(os.getenv("CRON_20_MIN_LEVEL", "0.05")),
+    "inactive_threshold": int(os.getenv("CRON_20_INACTIVE_THRESHOLD", "1")),
+    "state_file": os.getenv("CRON_20_STATE_FILE", f"{LOG_DIR}/activity_state_20.json"),
+    "run_until_standby": True,
+}
+
+CRON_0030_OVERRIDES: dict[str, Any] = {
+    "name": os.getenv("CRON_0030_NAME", CHROMECAST_NAME),
+    "interval": int(os.getenv("CRON_0030_INTERVAL_SEC", "900")),
+    "step": float(os.getenv("CRON_0030_STEP", str(STEP))),
+    "min_level": float(os.getenv("CRON_0030_MIN_LEVEL", "0.35")),
+    "inactive_threshold": int(os.getenv("CRON_0030_INACTIVE_THRESHOLD", "4")),
+    "state_file": os.getenv("CRON_0030_STATE_FILE", f"{LOG_DIR}/activity_state_0030.json"),
+    "run_until_standby": True,
 }
 
 # Chromecast を quit_app した後、standby 完了を待つ秒数

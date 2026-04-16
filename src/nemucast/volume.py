@@ -47,8 +47,8 @@ class VolumeSessionConfig:
     run_until_standby: bool
 
 
-class TickResult(str, Enum):
-    """1 tick 分の実行結果。``str`` 継承で従来の文字列比較と互換。"""
+class TickResult(Enum):
+    """1 tick 分の実行結果"""
 
     STANDBY = "standby"
     VOLUME_DOWN = "volume_down"
@@ -122,7 +122,7 @@ def run_volume_tick(
             config.inactive_threshold,
         )
 
-    history_entry = {
+    base_entry = {
         "timestamp": now_ts,
         "observed_volume": round(current_volume, 2),
         "inactive_streak": inactive_streak,
@@ -133,7 +133,7 @@ def run_volume_tick(
     if inactive_streak >= config.inactive_threshold:
         append_history(
             state,
-            {**history_entry, "applied_volume": round(current_volume, 2), "action": "standby"},
+            base_entry | {"applied_volume": round(current_volume, 2), "action": "standby"},
         )
         clear_state(config.state_file)
         standby_device(cast)
@@ -157,7 +157,7 @@ def run_volume_tick(
     )
     append_history(
         state,
-        {**history_entry, "applied_volume": round(applied_volume, 2), "action": result.value},
+        base_entry | {"applied_volume": round(applied_volume, 2), "action": result.value},
     )
     save_state(config.state_file, state)
     return result
