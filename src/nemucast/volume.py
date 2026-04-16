@@ -7,7 +7,6 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
 
 import pychromecast
 
@@ -25,9 +24,7 @@ from nemucast.state import (
 
 @dataclass(frozen=True)
 class VolumeSessionConfig:
-    """``run_volume_session`` に渡す設定値をまとめたデータクラス。
-
-    パラメータ爆発を避けつつ、不変性を担保するため ``frozen=True`` にしている。
+    """``run_volume_session`` / ``run_volume_tick`` に渡す設定値。
 
     Attributes:
         interval_sec: 定期実行の間隔（秒）。
@@ -51,11 +48,7 @@ class VolumeSessionConfig:
 
 
 class TickResult(str, Enum):
-    """1 tick 分の実行結果。
-
-    ``str`` を継承しているため、従来の文字列比較 (``result == "standby"``) と
-    互換性を保ちつつ、列挙メンバーとしても扱える。
-    """
+    """1 tick 分の実行結果。``str`` 継承で従来の文字列比較と互換。"""
 
     STANDBY = "standby"
     VOLUME_DOWN = "volume_down"
@@ -66,10 +59,8 @@ def calculate_next_volume(current_volume: float, step: float, min_level: float) 
     """次に設定する音量を計算する"""
     if current_volume <= min_level:
         return current_volume
-
     next_volume = round(current_volume + step, 2)
-    next_volume = max(min_level, next_volume)
-    return min(1.0, max(0.0, next_volume))
+    return min(1.0, max(min_level, next_volume))
 
 
 def lower_volume_once(
@@ -92,138 +83,44 @@ def lower_volume_once(
     return next_volume
 
 
-def _load_or_init_state(
-    state_file: Path,
-    device_name: str,
-    current_volume: float,
-    interval_sec: int,
-    now_ts: float,
-) -> dict[str, Any]:
-    """既存 state を読み込み、stale なら破棄して初期化する"""
-    state = load_state(state_file)
-    if state and is_state_stale(state, device_name, interval_sec, now_ts):
-        logging.info("既存の state が古いか別デバイスのため、新しいセッションとして開始します。")
-        state = None
-    if state is None:
-        state = create_initial_state(device_name, current_volume, now_ts)
-    return state
-
-
-def _resolve_inactive_streak(
-    state: dict[str, Any],
-    current_volume: float,
-    manual_rise_threshold: float,
-    inactive_threshold: int,
-) -> tuple[int, bool]:
-    """手動操作検知の結果から新しい inactive_streak と検知フラグを返す"""
-    last_auto_volume = state.get("last_auto_volume")
-    manual_raise_detected = detect_manual_activity(
-        current_volume=current_volume,
-        last_auto_volume=last_auto_volume,
-        rise_threshold=manual_rise_threshold,
-    )
-
-    if manual_raise_detected:
-        logging.info(
-            (
-                "手動で音量が上げられました "
-                "(前回 %.2f → 現在 %.2f)。非アクティブ回数をリセットします。"
-            ),
-            last_auto_volume,
-            current_volume,
-        )
-        return 0, True
-
-    inactive_streak = int(state.get("inactive_streak", 0)) + 1
-    logging.info(
-        "手動での音量上昇は未検出です。非アクティブ回数: %d/%d",
-        inactive_streak,
-        inactive_threshold,
-    )
-    return inactive_streak, False
-
-
-def _handle_standby(
-    cast: pychromecast.Chromecast,
-    state: dict[str, Any],
-    history_entry: dict[str, Any],
-    current_volume: float,
-    state_file: Path,
-) -> TickResult:
-    """非アクティブ閾値到達時に standby 処理を行う"""
-    append_history(
-        state,
-        {
-            **history_entry,
-            "applied_volume": round(current_volume, 2),
-            "action": TickResult.STANDBY.value,
-        },
-    )
-    clear_state(state_file)
-    standby_device(cast)
-    return TickResult.STANDBY
-
-
-def _apply_volume_adjustment(
-    cast: pychromecast.Chromecast,
-    state: dict[str, Any],
-    history_entry: dict[str, Any],
-    current_volume: float,
-    step: float,
-    min_level: float,
-    inactive_streak: int,
-    device_name: str,
-    now_ts: float,
-    state_file: Path,
-) -> TickResult:
-    """音量調整を実行し、state を保存して結果を返す"""
-    applied_volume = lower_volume_once(
-        cast=cast,
-        current_volume=current_volume,
-        step=step,
-        min_level=min_level,
-    )
-    result = TickResult.VOLUME_DOWN if applied_volume < current_volume else TickResult.KEEP
-
-    state.update(
-        {
-            "device_name": device_name,
-            "last_auto_volume": applied_volume,
-            "inactive_streak": inactive_streak,
-            "updated_at": now_ts,
-        }
-    )
-    append_history(
-        state,
-        {
-            **history_entry,
-            "applied_volume": round(applied_volume, 2),
-            "action": result.value,
-        },
-    )
-    save_state(state_file, state)
-    return result
-
-
 def run_volume_tick(
     cast: pychromecast.Chromecast,
-    interval_sec: int,
-    step: float,
-    min_level: float,
-    inactive_threshold: int,
-    manual_rise_threshold: float,
-    state_file: Path,
-    device_name: str,
+    config: VolumeSessionConfig,
 ) -> TickResult:
     """1回の定期実行ぶんの判定と音量操作を行う"""
     now_ts = time.time()
     current_volume = get_current_volume(cast)
     logging.info("現在の音量: %.2f", current_volume)
 
-    state = _load_or_init_state(state_file, device_name, current_volume, interval_sec, now_ts)
-    inactive_streak, manual_raise_detected = _resolve_inactive_streak(
-        state, current_volume, manual_rise_threshold, inactive_threshold
+    # 既存 state を読み込み、stale / 別デバイスなら破棄して初期化
+    state = load_state(config.state_file)
+    if state and is_state_stale(state, config.device_name, config.interval_sec, now_ts):
+        logging.info("既存の state が古いか別デバイスのため、新しいセッションとして開始します。")
+        state = None
+    if state is None:
+        state = create_initial_state(config.device_name, current_volume, now_ts)
+
+    # 手動操作の検知と inactive_streak 更新
+    last_auto_volume = state.get("last_auto_volume")
+    manual_raise_detected = detect_manual_activity(
+        current_volume=current_volume,
+        last_auto_volume=last_auto_volume,
+        rise_threshold=config.manual_rise_threshold,
     )
+    if manual_raise_detected:
+        logging.info(
+            "手動で音量が上げられました (前回 %.2f → 現在 %.2f)。非アクティブ回数をリセット。",
+            last_auto_volume,
+            current_volume,
+        )
+        inactive_streak = 0
+    else:
+        inactive_streak = int(state.get("inactive_streak", 0)) + 1
+        logging.info(
+            "手動での音量上昇は未検出です。非アクティブ回数: %d/%d",
+            inactive_streak,
+            config.inactive_threshold,
+        )
 
     history_entry = {
         "timestamp": now_ts,
@@ -232,21 +129,38 @@ def run_volume_tick(
         "manual_raise_detected": manual_raise_detected,
     }
 
-    if inactive_streak >= inactive_threshold:
-        return _handle_standby(cast, state, history_entry, current_volume, state_file)
+    # 閾値に到達したら standby に移行して state を破棄
+    if inactive_streak >= config.inactive_threshold:
+        append_history(
+            state,
+            {**history_entry, "applied_volume": round(current_volume, 2), "action": "standby"},
+        )
+        clear_state(config.state_file)
+        standby_device(cast)
+        return TickResult.STANDBY
 
-    return _apply_volume_adjustment(
+    # 音量を下げて state を保存
+    applied_volume = lower_volume_once(
         cast=cast,
-        state=state,
-        history_entry=history_entry,
         current_volume=current_volume,
-        step=step,
-        min_level=min_level,
-        inactive_streak=inactive_streak,
-        device_name=device_name,
-        now_ts=now_ts,
-        state_file=state_file,
+        step=config.step,
+        min_level=config.min_level,
     )
+    result = TickResult.VOLUME_DOWN if applied_volume < current_volume else TickResult.KEEP
+    state.update(
+        {
+            "device_name": config.device_name,
+            "last_auto_volume": applied_volume,
+            "inactive_streak": inactive_streak,
+            "updated_at": now_ts,
+        }
+    )
+    append_history(
+        state,
+        {**history_entry, "applied_volume": round(applied_volume, 2), "action": result.value},
+    )
+    save_state(config.state_file, state)
+    return result
 
 
 def run_volume_session(
@@ -255,16 +169,7 @@ def run_volume_session(
 ) -> TickResult:
     """1回または standby 到達までの連続セッションを実行する"""
     while True:
-        result = run_volume_tick(
-            cast=cast,
-            interval_sec=config.interval_sec,
-            step=config.step,
-            min_level=config.min_level,
-            inactive_threshold=config.inactive_threshold,
-            manual_rise_threshold=config.manual_rise_threshold,
-            state_file=config.state_file,
-            device_name=config.device_name,
-        )
+        result = run_volume_tick(cast=cast, config=config)
         if not config.run_until_standby or result == TickResult.STANDBY:
             return result
         logging.info("次の判定まで %d 秒待機します。", config.interval_sec)

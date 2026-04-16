@@ -23,96 +23,70 @@ from nemucast.config import (
     MIN_LEVEL,
     RUN_UNTIL_STANDBY,
     SCHEDULE_PROFILES,
-    STATE_STALE_INTERVAL_MULTIPLIER,
     STEP,
 )
 from nemucast.state import clear_state
 from nemucast.volume import VolumeSessionConfig, run_volume_session
 
 
-def _add_volume_arguments(parser: argparse.ArgumentParser, overrides: dict[str, Any]) -> None:
-    """音量・デバイス関連のオプションを parser に追加する。"""
-    parser.add_argument(
-        "-i",
-        "--interval",
-        type=int,
-        default=overrides.get("interval", DEFAULT_INTERVAL_SEC),
-        help=(
-            f"定期実行の間隔（秒）。デフォルト: {overrides.get('interval', DEFAULT_INTERVAL_SEC)}秒"
-        ),
-    )
-    parser.add_argument(
-        "-n",
-        "--name",
-        type=str,
-        default=overrides.get("name", CHROMECAST_NAME),
-        help=f"Chromecastの名前。デフォルト: {overrides.get('name', CHROMECAST_NAME)}",
-    )
-    parser.add_argument(
-        "-s",
-        "--step",
-        type=float,
-        default=overrides.get("step", STEP),
-        help=(f"音量調整のステップ（負の値）。デフォルト: {overrides.get('step', STEP)}"),
-    )
-    parser.add_argument(
-        "-m",
-        "--min-level",
-        type=float,
-        default=overrides.get("min_level", MIN_LEVEL),
-        help=(f"最小音量レベル。デフォルト: {overrides.get('min_level', MIN_LEVEL)}"),
-    )
-
-
-def _add_schedule_arguments(parser: argparse.ArgumentParser, overrides: dict[str, Any]) -> None:
-    """活動判定・セッション制御関連のオプションを parser に追加する。"""
-    parser.add_argument(
-        "--inactive-threshold",
-        type=int,
-        default=overrides.get("inactive_threshold", INACTIVE_THRESHOLD),
-        help=(
-            "非アクティブ判定までの連続回数。デフォルト: "
-            f"{overrides.get('inactive_threshold', INACTIVE_THRESHOLD)}"
-        ),
-    )
-    parser.add_argument(
-        "--manual-rise-threshold",
-        type=float,
-        default=overrides.get("manual_rise_threshold", MANUAL_RISE_THRESHOLD),
-        help=(
-            "手動で音量が上がったとみなす最小差分。"
-            f"デフォルト: {overrides.get('manual_rise_threshold', MANUAL_RISE_THRESHOLD)}"
-        ),
-    )
-    parser.add_argument(
-        "--state-file",
-        type=Path,
-        default=Path(overrides.get("state_file", DEFAULT_STATE_FILE)),
-        help=(
-            "活動判定用 state JSON の保存先。デフォルト: "
-            f"{overrides.get('state_file', DEFAULT_STATE_FILE)}"
-        ),
-    )
-    parser.add_argument(
-        "--run-until-standby",
-        action="store_true",
-        default=bool(overrides.get("run_until_standby", RUN_UNTIL_STANDBY)),
-        help="standby になるまで interval ごとに判定と音量調整を繰り返します。",
-    )
-
-
 def _build_parser(overrides: dict[str, Any]) -> argparse.ArgumentParser:
-    """引数パーサを組み立てる。"""
+    """CLI 引数パーサを組み立てる。``overrides`` はスケジュール別の既定値。"""
+
+    def default(key: str, fallback: Any) -> Any:
+        return overrides.get(key, fallback)
+
     parser = argparse.ArgumentParser(
         description="Chromecast / Google TV の音量を定期実行ごとに下げるスクリプト"
     )
-    _add_volume_arguments(parser, overrides)
-    _add_schedule_arguments(parser, overrides)
+    parser.add_argument(
+        "-i", "--interval",
+        type=int, default=default("interval", DEFAULT_INTERVAL_SEC),
+        help=f"定期実行の間隔（秒）。デフォルト: {default('interval', DEFAULT_INTERVAL_SEC)}秒",
+    )  # fmt: skip
+    parser.add_argument(
+        "-n", "--name",
+        type=str, default=default("name", CHROMECAST_NAME),
+        help=f"Chromecastの名前。デフォルト: {default('name', CHROMECAST_NAME)}",
+    )  # fmt: skip
+    parser.add_argument(
+        "-s", "--step",
+        type=float, default=default("step", STEP),
+        help=f"音量調整のステップ（負の値）。デフォルト: {default('step', STEP)}",
+    )  # fmt: skip
+    parser.add_argument(
+        "-m", "--min-level",
+        type=float, default=default("min_level", MIN_LEVEL),
+        help=f"最小音量レベル。デフォルト: {default('min_level', MIN_LEVEL)}",
+    )  # fmt: skip
+    inactive = default("inactive_threshold", INACTIVE_THRESHOLD)
+    manual_rise = default("manual_rise_threshold", MANUAL_RISE_THRESHOLD)
+    state_file = default("state_file", DEFAULT_STATE_FILE)
+    parser.add_argument(
+        "--inactive-threshold",
+        type=int, default=inactive,
+        help=f"非アクティブ判定までの連続回数。デフォルト: {inactive}",
+    )  # fmt: skip
+    parser.add_argument(
+        "--manual-rise-threshold",
+        type=float, default=manual_rise,
+        help=f"手動で音量が上がったとみなす最小差分。デフォルト: {manual_rise}",
+    )  # fmt: skip
+    parser.add_argument(
+        "--state-file",
+        type=Path, default=Path(state_file),
+        help=f"活動判定用 state JSON の保存先。デフォルト: {state_file}",
+    )  # fmt: skip
+    parser.add_argument(
+        "--run-until-standby",
+        action="store_true",
+        default=bool(default("run_until_standby", RUN_UNTIL_STANDBY)),
+        help="standby になるまで interval ごとに判定と音量調整を繰り返します。",
+    )
     return parser
 
 
 def _validate_arguments(parser: argparse.ArgumentParser, parsed: argparse.Namespace) -> None:
-    """解析済み引数と関連する設定定数の妥当性を検証する。"""
+    """解析済み引数の妥当性を検証する。"""
     if parsed.interval <= 0:
         parser.error("--interval は正の整数を指定してください")
     if parsed.step >= 0:
@@ -123,8 +97,6 @@ def _validate_arguments(parser: argparse.ArgumentParser, parsed: argparse.Namesp
         parser.error("--inactive-threshold は正の整数を指定してください")
     if parsed.manual_rise_threshold < 0:
         parser.error("--manual-rise-threshold は 0 以上を指定してください")
-    if STATE_STALE_INTERVAL_MULTIPLIER <= 0:
-        parser.error("STATE_STALE_INTERVAL_MULTIPLIER は正の整数である必要があります")
 
 
 def parse_args(
@@ -132,8 +104,7 @@ def parse_args(
     default_overrides: dict[str, Any] | None = None,
 ) -> argparse.Namespace:
     """コマンドライン引数を解析する"""
-    overrides = default_overrides or {}
-    parser = _build_parser(overrides)
+    parser = _build_parser(default_overrides or {})
     parsed = parser.parse_args(args)
     _validate_arguments(parser, parsed)
     return parsed
@@ -143,8 +114,6 @@ def setup_logging() -> None:
     """ロギングの設定を行う"""
     log_dir = Path.cwd() / LOG_DIR
     log_dir.mkdir(exist_ok=True)
-    log_file = log_dir / "lower_cast_volume.log"
-
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
     logging.basicConfig(
@@ -152,7 +121,7 @@ def setup_logging() -> None:
         format="[%(asctime)s] %(levelname)s: %(message)s",
         handlers=[
             logging.handlers.RotatingFileHandler(
-                log_file,
+                log_dir / "lower_cast_volume.log",
                 maxBytes=LOG_ROTATION_MAX_BYTES,
                 backupCount=LOG_ROTATION_BACKUP_COUNT,
                 encoding="utf-8",
@@ -163,14 +132,7 @@ def setup_logging() -> None:
 
 
 def build_schedule_defaults(profile_name: str) -> dict[str, Any]:
-    """スケジュール別の推奨設定を返す
-
-    Args:
-        profile_name: ``SCHEDULE_PROFILES`` に登録されたプロファイル名。
-
-    Returns:
-        プロファイルに紐づく既定値の辞書。呼び出し元で変更しても config 側の
-        定義に影響しないよう、毎回コピーを返す。
+    """スケジュール別の推奨設定を返す（呼び出し元で変更しても config 側に影響しない）。
 
     Raises:
         ValueError: 未知のプロファイル名が渡された場合。
@@ -179,18 +141,6 @@ def build_schedule_defaults(profile_name: str) -> dict[str, Any]:
     if profile is None:
         raise ValueError(f"未知のスケジュールプロファイルです: {profile_name}")
     return dict(profile)
-
-
-def _log_session_parameters(args: argparse.Namespace) -> None:
-    """セッション開始時のパラメータをログ出力する。"""
-    logging.info("定期実行の間隔: %d秒", args.interval)
-    logging.info("Chromecast名: %s", args.name)
-    logging.info("音量調整ステップ: %.2f", args.step)
-    logging.info("最小音量レベル: %.2f", args.min_level)
-    logging.info("非アクティブ判定回数: %d", args.inactive_threshold)
-    logging.info("手動上昇の判定差分: %.2f", args.manual_rise_threshold)
-    logging.info("state ファイル: %s", args.state_file)
-    logging.info("standby まで継続実行: %s", args.run_until_standby)
 
 
 def _build_session_config(args: argparse.Namespace) -> VolumeSessionConfig:
@@ -214,7 +164,19 @@ def run_with_args(
     """CLI 実行本体"""
     parsed = parse_args(args=args, default_overrides=default_overrides)
     setup_logging()
-    _log_session_parameters(parsed)
+
+    logging.info(
+        "設定: interval=%ds name=%s step=%.2f min_level=%.2f "
+        "inactive_threshold=%d manual_rise=%.2f state=%s run_until_standby=%s",
+        parsed.interval,
+        parsed.name,
+        parsed.step,
+        parsed.min_level,
+        parsed.inactive_threshold,
+        parsed.manual_rise_threshold,
+        parsed.state_file,
+        parsed.run_until_standby,
+    )
 
     cast, browser = discover_chromecasts(parsed.name)
     if cast is None:

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 
 from nemucast.state import save_state
+from nemucast.volume import VolumeSessionConfig
 
 
 @pytest.fixture
@@ -43,3 +45,24 @@ def seeded_state(state_file: Path) -> Path:
         },
     )
     return state_file
+
+
+@pytest.fixture
+def make_tick_config(state_file: Path):
+    """run_volume_tick テスト用の VolumeSessionConfig ファクトリ。"""
+
+    def _make(**overrides: Any) -> VolumeSessionConfig:
+        defaults = dict(
+            interval_sec=60,
+            step=-0.04,
+            min_level=0.3,
+            inactive_threshold=3,
+            manual_rise_threshold=0.01,
+            state_file=state_file,
+            device_name="Living Room",
+            run_until_standby=False,
+        )
+        defaults.update(overrides)
+        return VolumeSessionConfig(**defaults)
+
+    return _make
