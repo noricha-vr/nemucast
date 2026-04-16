@@ -1,22 +1,25 @@
 """コマンドライン引数のテスト"""
 
+from pathlib import Path
+
 import pytest
 
-import nemucast.main as main_module
-from nemucast.main import parse_args
+from nemucast import cli as cli_module
+from nemucast import config as config_module
+from nemucast.cli import parse_args
 
 
 def test_parse_args_default():
     """デフォルト引数のテスト"""
     args = parse_args([])
-    assert args.interval == main_module.DEFAULT_INTERVAL_SEC
-    assert args.name == main_module.CHROMECAST_NAME
-    assert args.step == main_module.STEP
-    assert args.min_level == main_module.MIN_LEVEL
-    assert args.inactive_threshold == main_module.INACTIVE_THRESHOLD
-    assert args.manual_rise_threshold == main_module.MANUAL_RISE_THRESHOLD
-    assert args.state_file == main_module.Path(main_module.DEFAULT_STATE_FILE)
-    assert args.run_until_standby is main_module.RUN_UNTIL_STANDBY
+    assert args.interval == config_module.DEFAULT_INTERVAL_SEC
+    assert args.name == config_module.CHROMECAST_NAME
+    assert args.step == config_module.STEP
+    assert args.min_level == config_module.MIN_LEVEL
+    assert args.inactive_threshold == config_module.INACTIVE_THRESHOLD
+    assert args.manual_rise_threshold == config_module.MANUAL_RISE_THRESHOLD
+    assert args.state_file == Path(config_module.DEFAULT_STATE_FILE)
+    assert args.run_until_standby is config_module.RUN_UNTIL_STANDBY
 
 
 def test_parse_args_custom():
@@ -46,7 +49,7 @@ def test_parse_args_custom():
     assert args.min_level == 0.2
     assert args.inactive_threshold == 4
     assert args.manual_rise_threshold == 0.03
-    assert args.state_file == main_module.Path("tmp/state.json")
+    assert args.state_file == Path("tmp/state.json")
     assert args.run_until_standby is True
 
 
@@ -66,7 +69,7 @@ def test_parse_args_with_overrides():
     assert args.interval == 900
     assert args.name == "Dell"
     assert args.inactive_threshold == 4
-    assert args.state_file == main_module.Path("logs/activity_state_0030.json")
+    assert args.state_file == Path("logs/activity_state_0030.json")
     assert args.run_until_standby is True
 
 
@@ -90,3 +93,10 @@ def test_parse_args_invalid(argv, message, capsys):
 
     captured = capsys.readouterr()
     assert message in captured.err
+
+
+def test_cli_module_exposes_entrypoints():
+    """後方互換の sanity check: CLI エントリが cli モジュールから参照できる"""
+    assert callable(cli_module.main)
+    assert callable(cli_module.main_cron_20)
+    assert callable(cli_module.main_cron_0030)
