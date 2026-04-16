@@ -10,22 +10,25 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from nemucast.main import (  # noqa: E402
+from nemucast.cast_client import (  # noqa: E402
+    discover_chromecasts,
+    standby_device,
+    stop_discovery,
+)
+from nemucast.cli import build_schedule_defaults, setup_logging  # noqa: E402
+from nemucast.state import (  # noqa: E402
     append_history,
-    build_schedule_defaults,
-    calculate_next_volume,
     clear_state,
     create_initial_state,
     detect_manual_activity,
-    discover_chromecasts,
     is_state_stale,
     load_state,
+    save_state,
+)
+from nemucast.volume import (  # noqa: E402
+    calculate_next_volume,
     run_volume_session,
     run_volume_tick,
-    save_state,
-    setup_logging,
-    standby_device,
-    stop_discovery,
 )
 
 
@@ -144,7 +147,7 @@ class TestRefactoredFunctions:
         """スタンバイ移行のテスト"""
         mock_cast = Mock()
 
-        with patch("nemucast.main.time.sleep") as mock_sleep:
+        with patch("nemucast.cast_client.time.sleep") as mock_sleep:
             standby_device(mock_cast)
 
         mock_cast.quit_app.assert_called_once()
@@ -166,7 +169,7 @@ class TestRefactoredFunctions:
         mock_cast = Mock()
         mock_cast.status.volume_level = 0.5
 
-        with patch("nemucast.main.time.time", return_value=110.0):
+        with patch("nemucast.volume.time.time", return_value=110.0):
             result = run_volume_tick(
                 cast=mock_cast,
                 interval_sec=60,
@@ -202,8 +205,8 @@ class TestRefactoredFunctions:
         mock_cast.status.volume_level = 0.4
 
         with (
-            patch("nemucast.main.time.time", return_value=110.0),
-            patch("nemucast.main.time.sleep"),
+            patch("nemucast.volume.time.time", return_value=110.0),
+            patch("nemucast.cast_client.time.sleep"),
         ):
             result = run_volume_tick(
                 cast=mock_cast,
@@ -237,7 +240,7 @@ class TestRefactoredFunctions:
         mock_cast = Mock()
         mock_cast.status.volume_level = 0.6
 
-        with patch("nemucast.main.time.time", return_value=200.0):
+        with patch("nemucast.volume.time.time", return_value=200.0):
             result = run_volume_tick(
                 cast=mock_cast,
                 interval_sec=60,
@@ -260,7 +263,7 @@ class TestRefactoredFunctions:
         mock_cast = Mock()
         mock_cast.status.volume_level = 0.25
 
-        with patch("nemucast.main.time.time", return_value=100.0):
+        with patch("nemucast.volume.time.time", return_value=100.0):
             result = run_volume_tick(
                 cast=mock_cast,
                 interval_sec=60,
@@ -295,8 +298,8 @@ class TestRefactoredFunctions:
         mock_cast = Mock()
 
         with (
-            patch("nemucast.main.run_volume_tick", return_value="volume_down") as mock_tick,
-            patch("nemucast.main.time.sleep") as mock_sleep,
+            patch("nemucast.volume.run_volume_tick", return_value="volume_down") as mock_tick,
+            patch("nemucast.volume.time.sleep") as mock_sleep,
         ):
             result = run_volume_session(
                 cast=mock_cast,
@@ -320,10 +323,10 @@ class TestRefactoredFunctions:
 
         with (
             patch(
-                "nemucast.main.run_volume_tick",
+                "nemucast.volume.run_volume_tick",
                 side_effect=["volume_down", "keep", "standby"],
             ) as mock_tick,
-            patch("nemucast.main.time.sleep") as mock_sleep,
+            patch("nemucast.volume.time.sleep") as mock_sleep,
         ):
             result = run_volume_session(
                 cast=mock_cast,
