@@ -102,6 +102,45 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 6. しきい値未満なら音量を 1 回下げる
 7. しきい値以上なら standby にして state を削除する
 
+### フロー図
+
+```mermaid
+flowchart TD
+    Start([cron / CLI 起動]) --> Connect[Chromecast 接続]
+    Connect --> LoadState{state JSON<br/>存在かつ有効?}
+    LoadState -->|なし or stale| NewSession[新セッション<br/>state 初期化]
+    LoadState -->|あり| CheckVolume[現在音量を取得]
+    NewSession --> CheckVolume
+    CheckVolume --> Manual{current &gt;<br/>last_auto_volume +<br/>MANUAL_RISE_THRESHOLD?}
+    Manual -->|Yes 手動上昇| Reset[inactive_streak = 0<br/>活動あり]
+    Manual -->|No| Increment[inactive_streak += 1<br/>非アクティブ]
+    Reset --> SaveState[state 保存]
+    Increment --> Threshold{inactive_streak &gt;=<br/>INACTIVE_THRESHOLD?}
+    Threshold -->|Yes| Standby[quit_app で standby<br/>state 削除]
+    Threshold -->|No| LowerVol[音量を STEP 分下げる<br/>MIN_LEVEL でクリップ]
+    LowerVol --> SaveState
+    Standby --> End([終了])
+    SaveState --> End
+```
+
+stale 判定の条件: `now - updated_at > INTERVAL_SEC * STATE_STALE_INTERVAL_MULTIPLIER`（既定 2 倍）。
+これを超えると state は破棄され、新セッションとして `inactive_streak = 0` から再スタートします。
+
+### プロファイル別の設定値対比
+
+同じロジックでも、プロファイルの設定値によって挙動が大きく変わります。
+
+| 項目 | 通常実行 (`nemucast`) | 20:00 用 (`cron-20`) | 00:30 用 (`cron-0030`) |
+|------|----------------------|----------------------|------------------------|
+| `INTERVAL_SEC` | 1200（20分） | 60（1分） | 900（15分） |
+| `INACTIVE_THRESHOLD` | 3 | 1 | 4 |
+| `MIN_LEVEL` | 0.3 | 0.05 | 0.35 |
+| standby までの最短時間 | 約 40 分（3 tick） | 即時（1 tick） | 約 45 分（4 tick） |
+| 用途 | 任意のタイミングで段階的に静音化 | 「20:00 になったら即切る」運用 | 深夜 00:30 以降、徐々に下げて自然に切る運用 |
+
+- `cron-20` は `INACTIVE_THRESHOLD=1` なので、起動 1 回目のチェックで即 standby に到達します。
+- `cron-0030` は 15 分刻みで 4 回まで音量を下げながら待つため、途中で手動で音量を上げれば streak がリセットされ、視聴を続けられます。
+
 ## 📝 ログと state
 
 - 実行ログ: `logs/lower_cast_volume.log`
