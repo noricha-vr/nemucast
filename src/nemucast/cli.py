@@ -13,24 +13,16 @@ from typing import Any
 from nemucast.cast_client import discover_chromecasts, stop_discovery
 from nemucast.config import (
     CHROMECAST_NAME,
-    CRON_0030_INACTIVE_THRESHOLD,
-    CRON_0030_INTERVAL_SEC,
-    CRON_0030_MIN_LEVEL,
-    CRON_0030_NAME,
-    CRON_0030_STATE_FILE,
-    CRON_0030_STEP,
-    CRON_20_INACTIVE_THRESHOLD,
-    CRON_20_INTERVAL_SEC,
-    CRON_20_MIN_LEVEL,
-    CRON_20_NAME,
-    CRON_20_STATE_FILE,
-    CRON_20_STEP,
     DEFAULT_INTERVAL_SEC,
     DEFAULT_STATE_FILE,
     INACTIVE_THRESHOLD,
+    LOG_DIR,
+    LOG_ROTATION_BACKUP_COUNT,
+    LOG_ROTATION_MAX_BYTES,
     MANUAL_RISE_THRESHOLD,
     MIN_LEVEL,
     RUN_UNTIL_STANDBY,
+    SCHEDULE_PROFILES,
     STATE_STALE_INTERVAL_MULTIPLIER,
     STEP,
 )
@@ -125,7 +117,7 @@ def parse_args(args=None, default_overrides: dict[str, Any] | None = None):
 
 def setup_logging() -> None:
     """ロギングの設定を行う"""
-    log_dir = Path.cwd() / "logs"
+    log_dir = Path.cwd() / LOG_DIR
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / "lower_cast_volume.log"
 
@@ -136,7 +128,10 @@ def setup_logging() -> None:
         format="[%(asctime)s] %(levelname)s: %(message)s",
         handlers=[
             logging.handlers.RotatingFileHandler(
-                log_file, maxBytes=512 * 1024, backupCount=1, encoding="utf-8"
+                log_file,
+                maxBytes=LOG_ROTATION_MAX_BYTES,
+                backupCount=LOG_ROTATION_BACKUP_COUNT,
+                encoding="utf-8",
             ),
             logging.StreamHandler(sys.stdout),
         ],
@@ -144,30 +139,22 @@ def setup_logging() -> None:
 
 
 def build_schedule_defaults(profile_name: str) -> dict[str, Any]:
-    """スケジュール別の推奨設定を返す"""
-    if profile_name == "cron-20":
-        return {
-            "name": CRON_20_NAME,
-            "interval": CRON_20_INTERVAL_SEC,
-            "step": CRON_20_STEP,
-            "min_level": CRON_20_MIN_LEVEL,
-            "inactive_threshold": CRON_20_INACTIVE_THRESHOLD,
-            "state_file": CRON_20_STATE_FILE,
-            "run_until_standby": True,
-        }
+    """スケジュール別の推奨設定を返す
 
-    if profile_name == "cron-0030":
-        return {
-            "name": CRON_0030_NAME,
-            "interval": CRON_0030_INTERVAL_SEC,
-            "step": CRON_0030_STEP,
-            "min_level": CRON_0030_MIN_LEVEL,
-            "inactive_threshold": CRON_0030_INACTIVE_THRESHOLD,
-            "state_file": CRON_0030_STATE_FILE,
-            "run_until_standby": True,
-        }
+    Args:
+        profile_name: ``SCHEDULE_PROFILES`` に登録されたプロファイル名。
 
-    raise ValueError(f"未知のスケジュールプロファイルです: {profile_name}")
+    Returns:
+        プロファイルに紐づく既定値の辞書。呼び出し元で変更しても config 側の
+        定義に影響しないよう、毎回コピーを返す。
+
+    Raises:
+        ValueError: 未知のプロファイル名が渡された場合。
+    """
+    profile = SCHEDULE_PROFILES.get(profile_name)
+    if profile is None:
+        raise ValueError(f"未知のスケジュールプロファイルです: {profile_name}")
+    return dict(profile)
 
 
 def run_with_args(args=None, default_overrides: dict[str, Any] | None = None) -> None:

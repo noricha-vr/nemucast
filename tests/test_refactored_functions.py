@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from nemucast import config as config_module  # noqa: E402
 from nemucast.cast_client import (  # noqa: E402
     discover_chromecasts,
     standby_device,
@@ -376,3 +377,44 @@ class TestRefactoredFunctions:
 
         for key, value in expected.items():
             assert defaults[key] == value
+
+    def test_build_schedule_defaults_unknown_profile(self):
+        """未知のプロファイル名は ValueError"""
+        with pytest.raises(ValueError, match="未知のスケジュールプロファイル"):
+            build_schedule_defaults("unknown-profile")
+
+    def test_build_schedule_defaults_returns_independent_copy(self):
+        """返り値を変更しても SCHEDULE_PROFILES 側は汚染されない"""
+        defaults = build_schedule_defaults("cron-20")
+        defaults["interval"] = -1
+
+        assert config_module.SCHEDULE_PROFILES["cron-20"]["interval"] != -1
+
+    def test_schedule_profiles_contains_expected_keys(self):
+        """SCHEDULE_PROFILES には既知のプロファイルと必要なキーが揃っている"""
+        required_keys = {
+            "name",
+            "interval",
+            "step",
+            "min_level",
+            "inactive_threshold",
+            "state_file",
+            "run_until_standby",
+        }
+
+        assert set(config_module.SCHEDULE_PROFILES.keys()) == {"cron-20", "cron-0030"}
+        for profile in config_module.SCHEDULE_PROFILES.values():
+            assert required_keys <= set(profile.keys())
+
+    def test_log_dir_default(self):
+        """LOG_DIR のデフォルトは 'logs'"""
+        assert config_module.LOG_DIR == "logs"
+
+    def test_standby_wait_sec_default(self):
+        """STANDBY_WAIT_SEC のデフォルトは 2 秒"""
+        assert config_module.STANDBY_WAIT_SEC == 2
+
+    def test_log_rotation_defaults(self):
+        """ログローテーション設定のデフォルトは 512KB / backup 1"""
+        assert config_module.LOG_ROTATION_MAX_BYTES == 512 * 1024
+        assert config_module.LOG_ROTATION_BACKUP_COUNT == 1

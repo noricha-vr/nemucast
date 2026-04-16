@@ -7,6 +7,8 @@ import time
 
 import pychromecast
 
+from nemucast.config import STANDBY_WAIT_SEC
+
 
 def discover_chromecasts(
     target_name: str,
@@ -60,5 +62,5 @@ def standby_device(cast) -> None:
     """Chromecast をスタンバイへ移行する"""
     logging.info("非アクティブ判定に達したため、Chromecastをスタンバイモードにします。")
     cast.quit_app()
-    time.sleep(2)
+    time.sleep(STANDBY_WAIT_SEC)
     logging.info("Chromecastがスタンバイモードになりました。")
