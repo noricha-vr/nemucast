@@ -38,7 +38,10 @@ from nemucast.state import clear_state
 from nemucast.volume import run_volume_session
 
 
-def parse_args(args=None, default_overrides: dict[str, Any] | None = None):
+def parse_args(
+    args: list[str] | None = None,
+    default_overrides: dict[str, Any] | None = None,
+) -> argparse.Namespace:
     """コマンドライン引数を解析する"""
     overrides = default_overrides or {}
     parser = argparse.ArgumentParser(
@@ -170,7 +173,10 @@ def build_schedule_defaults(profile_name: str) -> dict[str, Any]:
     raise ValueError(f"未知のスケジュールプロファイルです: {profile_name}")
 
 
-def run_with_args(args=None, default_overrides: dict[str, Any] | None = None) -> None:
+def run_with_args(
+    args: list[str] | None = None,
+    default_overrides: dict[str, Any] | None = None,
+) -> None:
     """CLI 実行本体"""
     args = parse_args(args=args, default_overrides=default_overrides)
     setup_logging()
