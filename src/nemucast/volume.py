@@ -6,6 +6,8 @@ import logging
 import time
 from pathlib import Path
 
+import pychromecast
+
 from nemucast.cast_client import get_current_volume, standby_device
 from nemucast.state import (
     append_history,
@@ -28,7 +30,12 @@ def calculate_next_volume(current_volume: float, step: float, min_level: float) 
     return min(1.0, max(0.0, next_volume))
 
 
-def lower_volume_once(cast, current_volume: float, step: float, min_level: float) -> float:
+def lower_volume_once(
+    cast: pychromecast.Chromecast,
+    current_volume: float,
+    step: float,
+    min_level: float,
+) -> float:
     """1回分だけ音量を下げる"""
     next_volume = calculate_next_volume(current_volume, step, min_level)
     if next_volume < current_volume:
@@ -44,7 +51,7 @@ def lower_volume_once(cast, current_volume: float, step: float, min_level: float
 
 
 def run_volume_tick(
-    cast,
+    cast: pychromecast.Chromecast,
     interval_sec: int,
     step: float,
     min_level: float,
@@ -139,7 +146,7 @@ def run_volume_tick(
 
 
 def run_volume_session(
-    cast,
+    cast: pychromecast.Chromecast,
     interval_sec: int,
     step: float,
     min_level: float,

@@ -48,7 +48,7 @@ def stop_discovery(
     pychromecast.stop_discovery(browser)
 
 
-def get_current_volume(cast) -> float:
+def get_current_volume(cast: pychromecast.Chromecast) -> float:
     """現在音量を取得する"""
     current_volume = cast.status.volume_level
     if current_volume is None:
@@ -56,7 +56,7 @@ def get_current_volume(cast) -> float:
     return float(current_volume)
 
 
-def standby_device(cast) -> None:
+def standby_device(cast: pychromecast.Chromecast) -> None:
     """Chromecast をスタンバイへ移行する"""
     logging.info("非アクティブ判定に達したため、Chromecastをスタンバイモードにします。")
     cast.quit_app()
