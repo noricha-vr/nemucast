@@ -9,7 +9,6 @@ import pytest
 from nemucast import cli as cli_module
 from nemucast import config as config_module
 from nemucast.cli import parse_args
-from nemucast.volume import VolumeSessionConfig
 
 
 def test_parse_args_default():
@@ -109,38 +108,3 @@ def test_parse_args_return_annotation():
     """parse_args の戻り値型は argparse.Namespace"""
     hints = typing.get_type_hints(parse_args)
     assert hints["return"] is argparse.Namespace
-
-
-def test_build_session_config_maps_all_fields():
-    """解析済み引数が VolumeSessionConfig に正しくマップされる"""
-    parsed = parse_args(
-        [
-            "--interval",
-            "600",
-            "--name",
-            "Living Room",
-            "--step",
-            "-0.05",
-            "--min-level",
-            "0.2",
-            "--inactive-threshold",
-            "4",
-            "--manual-rise-threshold",
-            "0.03",
-            "--state-file",
-            "tmp/state.json",
-            "--run-until-standby",
-        ]
-    )
-
-    config = cli_module._build_session_config(parsed)
-
-    assert isinstance(config, VolumeSessionConfig)
-    assert config.interval_sec == 600
-    assert config.device_name == "Living Room"
-    assert config.step == -0.05
-    assert config.min_level == 0.2
-    assert config.inactive_threshold == 4
-    assert config.manual_rise_threshold == 0.03
-    assert config.state_file == Path("tmp/state.json")
-    assert config.run_until_standby is True

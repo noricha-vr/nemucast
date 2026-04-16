@@ -70,11 +70,11 @@ def test_lower_volume_once_skips_set_volume_when_at_min_level() -> None:
     mock_cast.set_volume.assert_not_called()
 
 
-def test_tick_result_is_str_compatible() -> None:
-    """TickResult は文字列としても比較できる（後方互換）"""
-    assert TickResult.STANDBY == "standby"
-    assert TickResult.VOLUME_DOWN == "volume_down"
-    assert TickResult.KEEP == "keep"
+def test_tick_result_values() -> None:
+    """TickResult は state.history に残す文字列値を持つ"""
+    assert TickResult.STANDBY.value == "standby"
+    assert TickResult.VOLUME_DOWN.value == "volume_down"
+    assert TickResult.KEEP.value == "keep"
 
 
 def test_run_volume_tick_detects_manual_raise_and_resets_streak(
@@ -87,7 +87,7 @@ def test_run_volume_tick_detects_manual_raise_and_resets_streak(
         result = run_volume_tick(cast=mock_cast, config=make_tick_config(state_file=seeded_state))
 
     saved = load_state(seeded_state)
-    assert result == "volume_down"
+    assert result == TickResult.VOLUME_DOWN
     assert saved["inactive_streak"] == 0
     assert saved["last_auto_volume"] == 0.46
     assert saved["history"][-1]["manual_raise_detected"] is True
@@ -106,7 +106,7 @@ def test_run_volume_tick_reaches_inactive_threshold_and_standby(
     ):
         result = run_volume_tick(cast=mock_cast, config=make_tick_config(state_file=seeded_state))
 
-    assert result == "standby"
+    assert result == TickResult.STANDBY
     assert not seeded_state.exists()
     mock_cast.quit_app.assert_called_once()
     mock_cast.set_volume.assert_not_called()
@@ -134,7 +134,7 @@ def test_run_volume_tick_resets_stale_state(
         result = run_volume_tick(cast=mock_cast, config=make_tick_config())
 
     saved = load_state(state_file)
-    assert result == "volume_down"
+    assert result == TickResult.VOLUME_DOWN
     assert saved["inactive_streak"] == 1
     assert saved["last_auto_volume"] == 0.56
 
@@ -149,7 +149,7 @@ def test_run_volume_tick_keeps_volume_when_at_min_level(
         result = run_volume_tick(cast=mock_cast, config=make_tick_config())
 
     saved = load_state(state_file)
-    assert result == "keep"
+    assert result == TickResult.KEEP
     assert saved["inactive_streak"] == 1
     assert saved["last_auto_volume"] == 0.25
     mock_cast.set_volume.assert_not_called()
@@ -170,12 +170,12 @@ def test_run_volume_session_one_shot() -> None:
     )
 
     with (
-        patch("nemucast.volume.run_volume_tick", return_value="volume_down") as mock_tick,
+        patch("nemucast.volume.run_volume_tick", return_value=TickResult.VOLUME_DOWN) as mock_tick,
         patch("nemucast.volume.time.sleep") as mock_sleep,
     ):
         result = run_volume_session(cast=mock_cast, config=config)
 
-    assert result == "volume_down"
+    assert result == TickResult.VOLUME_DOWN
     assert mock_tick.call_count == 1
     mock_sleep.assert_not_called()
 
@@ -197,13 +197,13 @@ def test_run_volume_session_until_standby() -> None:
     with (
         patch(
             "nemucast.volume.run_volume_tick",
-            side_effect=["volume_down", "keep", "standby"],
+            side_effect=[TickResult.VOLUME_DOWN, TickResult.KEEP, TickResult.STANDBY],
         ) as mock_tick,
         patch("nemucast.volume.time.sleep") as mock_sleep,
     ):
         result = run_volume_session(cast=mock_cast, config=config)
 
-    assert result == "standby"
+    assert result == TickResult.STANDBY
     assert mock_tick.call_count == 3
     assert mock_sleep.call_count == 2
     mock_sleep.assert_called_with(900)

@@ -13,6 +13,8 @@ from typing import Any
 from nemucast.cast_client import discover_chromecasts, stop_discovery
 from nemucast.config import (
     CHROMECAST_NAME,
+    CRON_0030_OVERRIDES,
+    CRON_20_OVERRIDES,
     DEFAULT_INTERVAL_SEC,
     DEFAULT_STATE_FILE,
     INACTIVE_THRESHOLD,
@@ -22,45 +24,47 @@ from nemucast.config import (
     MANUAL_RISE_THRESHOLD,
     MIN_LEVEL,
     RUN_UNTIL_STANDBY,
-    SCHEDULE_PROFILES,
     STEP,
 )
 from nemucast.state import clear_state
 from nemucast.volume import VolumeSessionConfig, run_volume_session
 
 
-def _build_parser(overrides: dict[str, Any]) -> argparse.ArgumentParser:
-    """CLI 引数パーサを組み立てる。``overrides`` はスケジュール別の既定値。"""
+def parse_args(
+    args: list[str] | None = None,
+    default_overrides: dict[str, Any] | None = None,
+) -> argparse.Namespace:
+    """コマンドライン引数を解析する。
 
-    def default(key: str, fallback: Any) -> Any:
-        return overrides.get(key, fallback)
+    ``default_overrides`` は cron プロファイルなどが各オプションの既定値を差し替えるために使う。
+    """
+    ov = default_overrides or {}
+
+    def d(key: str, fallback: Any) -> Any:
+        return ov.get(key, fallback)
 
     parser = argparse.ArgumentParser(
         description="Chromecast / Google TV の音量を定期実行ごとに下げるスクリプト"
     )
     parser.add_argument(
-        "-i", "--interval",
-        type=int, default=default("interval", DEFAULT_INTERVAL_SEC),
-        help=f"定期実行の間隔（秒）。デフォルト: {default('interval', DEFAULT_INTERVAL_SEC)}秒",
+        "-i", "--interval", type=int, default=d("interval", DEFAULT_INTERVAL_SEC),
+        help=f"定期実行の間隔（秒）。デフォルト: {d('interval', DEFAULT_INTERVAL_SEC)}秒",
     )  # fmt: skip
     parser.add_argument(
-        "-n", "--name",
-        type=str, default=default("name", CHROMECAST_NAME),
-        help=f"Chromecastの名前。デフォルト: {default('name', CHROMECAST_NAME)}",
+        "-n", "--name", type=str, default=d("name", CHROMECAST_NAME),
+        help=f"Chromecastの名前。デフォルト: {d('name', CHROMECAST_NAME)}",
     )  # fmt: skip
     parser.add_argument(
-        "-s", "--step",
-        type=float, default=default("step", STEP),
-        help=f"音量調整のステップ（負の値）。デフォルト: {default('step', STEP)}",
+        "-s", "--step", type=float, default=d("step", STEP),
+        help=f"音量調整のステップ（負の値）。デフォルト: {d('step', STEP)}",
     )  # fmt: skip
     parser.add_argument(
-        "-m", "--min-level",
-        type=float, default=default("min_level", MIN_LEVEL),
-        help=f"最小音量レベル。デフォルト: {default('min_level', MIN_LEVEL)}",
+        "-m", "--min-level", type=float, default=d("min_level", MIN_LEVEL),
+        help=f"最小音量レベル。デフォルト: {d('min_level', MIN_LEVEL)}",
     )  # fmt: skip
-    inactive = default("inactive_threshold", INACTIVE_THRESHOLD)
-    manual_rise = default("manual_rise_threshold", MANUAL_RISE_THRESHOLD)
-    state_file = default("state_file", DEFAULT_STATE_FILE)
+    inactive = d("inactive_threshold", INACTIVE_THRESHOLD)
+    manual_rise = d("manual_rise_threshold", MANUAL_RISE_THRESHOLD)
+    state_file = d("state_file", DEFAULT_STATE_FILE)
     parser.add_argument(
         "--inactive-threshold",
         type=int, default=inactive,
@@ -79,14 +83,12 @@ def _build_parser(overrides: dict[str, Any]) -> argparse.ArgumentParser:
     parser.add_argument(
         "--run-until-standby",
         action="store_true",
-        default=bool(default("run_until_standby", RUN_UNTIL_STANDBY)),
+        default=bool(d("run_until_standby", RUN_UNTIL_STANDBY)),
         help="standby になるまで interval ごとに判定と音量調整を繰り返します。",
     )
-    return parser
 
+    parsed = parser.parse_args(args)
 
-def _validate_arguments(parser: argparse.ArgumentParser, parsed: argparse.Namespace) -> None:
-    """解析済み引数の妥当性を検証する。"""
     if parsed.interval <= 0:
         parser.error("--interval は正の整数を指定してください")
     if parsed.step >= 0:
@@ -98,15 +100,6 @@ def _validate_arguments(parser: argparse.ArgumentParser, parsed: argparse.Namesp
     if parsed.manual_rise_threshold < 0:
         parser.error("--manual-rise-threshold は 0 以上を指定してください")
 
-
-def parse_args(
-    args: list[str] | None = None,
-    default_overrides: dict[str, Any] | None = None,
-) -> argparse.Namespace:
-    """コマンドライン引数を解析する"""
-    parser = _build_parser(default_overrides or {})
-    parsed = parser.parse_args(args)
-    _validate_arguments(parser, parsed)
     return parsed
 
 
@@ -128,32 +121,6 @@ def setup_logging() -> None:
             ),
             logging.StreamHandler(sys.stdout),
         ],
-    )
-
-
-def build_schedule_defaults(profile_name: str) -> dict[str, Any]:
-    """スケジュール別の推奨設定を返す（呼び出し元で変更しても config 側に影響しない）。
-
-    Raises:
-        ValueError: 未知のプロファイル名が渡された場合。
-    """
-    profile = SCHEDULE_PROFILES.get(profile_name)
-    if profile is None:
-        raise ValueError(f"未知のスケジュールプロファイルです: {profile_name}")
-    return dict(profile)
-
-
-def _build_session_config(args: argparse.Namespace) -> VolumeSessionConfig:
-    """解析済み引数から ``VolumeSessionConfig`` を組み立てる。"""
-    return VolumeSessionConfig(
-        interval_sec=args.interval,
-        step=args.step,
-        min_level=args.min_level,
-        inactive_threshold=args.inactive_threshold,
-        manual_rise_threshold=args.manual_rise_threshold,
-        state_file=args.state_file,
-        device_name=args.name,
-        run_until_standby=args.run_until_standby,
     )
 
 
@@ -186,8 +153,18 @@ def run_with_args(
     try:
         logging.info("接続完了: %s (%s)", cast.cast_info.friendly_name, cast.cast_info.host)
         cast.wait()
-        result = run_volume_session(cast=cast, config=_build_session_config(parsed))
-        logging.info("今回の実行結果: %s", result)
+        config = VolumeSessionConfig(
+            interval_sec=parsed.interval,
+            step=parsed.step,
+            min_level=parsed.min_level,
+            inactive_threshold=parsed.inactive_threshold,
+            manual_rise_threshold=parsed.manual_rise_threshold,
+            state_file=parsed.state_file,
+            device_name=parsed.name,
+            run_until_standby=parsed.run_until_standby,
+        )
+        result = run_volume_session(cast=cast, config=config)
+        logging.info("今回の実行結果: %s", result.value)
     except KeyboardInterrupt:
         logging.info("中断されました。")
         raise
@@ -207,12 +184,12 @@ def main() -> None:
 
 def main_cron_20() -> None:
     """20:00 用の即時 standby プロファイル"""
-    run_with_args(default_overrides=build_schedule_defaults("cron-20"))
+    run_with_args(default_overrides=CRON_20_OVERRIDES)
 
 
 def main_cron_0030() -> None:
     """00:30 用の 15 分間隔プロファイル"""
-    run_with_args(default_overrides=build_schedule_defaults("cron-0030"))
+    run_with_args(default_overrides=CRON_0030_OVERRIDES)
 
 
 if __name__ == "__main__":

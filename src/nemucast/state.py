@@ -83,10 +83,6 @@ def detect_manual_activity(
 def append_history(state: dict[str, Any], entry: dict[str, Any]) -> None:
     """履歴を最大件数まで保持する"""
     history = state.setdefault("history", [])
-    if not isinstance(history, list):
-        history = []
-        state["history"] = history
-
     history.append(entry)
     if len(history) > MAX_HISTORY_ENTRIES:
         del history[:-MAX_HISTORY_ENTRIES]
