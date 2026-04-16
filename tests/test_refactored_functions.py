@@ -28,6 +28,7 @@ from nemucast.state import (  # noqa: E402
 )
 from nemucast.volume import (  # noqa: E402
     TickResult,
+    VolumeSessionConfig,
     calculate_next_volume,
     lower_volume_once,
     run_volume_session,
@@ -347,22 +348,22 @@ class TestRefactoredFunctions:
     def test_run_volume_session_one_shot(self):
         """1回実行モードでは sleep せずに1回だけ tick する"""
         mock_cast = Mock()
+        config = VolumeSessionConfig(
+            interval_sec=900,
+            step=-0.04,
+            min_level=0.3,
+            inactive_threshold=4,
+            manual_rise_threshold=0.01,
+            state_file=Path("logs/state.json"),
+            device_name="Living Room",
+            run_until_standby=False,
+        )
 
         with (
             patch("nemucast.volume.run_volume_tick", return_value="volume_down") as mock_tick,
             patch("nemucast.volume.time.sleep") as mock_sleep,
         ):
-            result = run_volume_session(
-                cast=mock_cast,
-                interval_sec=900,
-                step=-0.04,
-                min_level=0.3,
-                inactive_threshold=4,
-                manual_rise_threshold=0.01,
-                state_file=Path("logs/state.json"),
-                device_name="Living Room",
-                run_until_standby=False,
-            )
+            result = run_volume_session(cast=mock_cast, config=config)
 
         assert result == "volume_down"
         assert mock_tick.call_count == 1
@@ -371,6 +372,16 @@ class TestRefactoredFunctions:
     def test_run_volume_session_until_standby(self):
         """standby 到達まで interval ごとに繰り返す"""
         mock_cast = Mock()
+        config = VolumeSessionConfig(
+            interval_sec=900,
+            step=-0.04,
+            min_level=0.35,
+            inactive_threshold=4,
+            manual_rise_threshold=0.01,
+            state_file=Path("logs/activity_state_0030.json"),
+            device_name="Dell",
+            run_until_standby=True,
+        )
 
         with (
             patch(
@@ -379,22 +390,28 @@ class TestRefactoredFunctions:
             ) as mock_tick,
             patch("nemucast.volume.time.sleep") as mock_sleep,
         ):
-            result = run_volume_session(
-                cast=mock_cast,
-                interval_sec=900,
-                step=-0.04,
-                min_level=0.35,
-                inactive_threshold=4,
-                manual_rise_threshold=0.01,
-                state_file=Path("logs/activity_state_0030.json"),
-                device_name="Dell",
-                run_until_standby=True,
-            )
+            result = run_volume_session(cast=mock_cast, config=config)
 
         assert result == "standby"
         assert mock_tick.call_count == 3
         assert mock_sleep.call_count == 2
         mock_sleep.assert_called_with(900)
+
+    def test_volume_session_config_is_frozen(self):
+        """VolumeSessionConfig は不変（frozen）"""
+        config = VolumeSessionConfig(
+            interval_sec=900,
+            step=-0.04,
+            min_level=0.3,
+            inactive_threshold=4,
+            manual_rise_threshold=0.01,
+            state_file=Path("logs/state.json"),
+            device_name="Dell",
+            run_until_standby=False,
+        )
+
+        with pytest.raises(Exception):
+            config.interval_sec = 100  # type: ignore[misc]
 
     @pytest.mark.parametrize(
         ("profile_name", "expected"),
