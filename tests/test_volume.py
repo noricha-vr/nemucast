@@ -78,22 +78,13 @@ def test_tick_result_is_str_compatible() -> None:
 
 
 def test_run_volume_tick_detects_manual_raise_and_resets_streak(
-    seeded_state: Path, mock_cast: Mock
+    seeded_state: Path, mock_cast: Mock, make_tick_config
 ) -> None:
     """手動で音量が上がっていれば streak をリセットして継続"""
     mock_cast.status.volume_level = 0.5
 
     with patch("nemucast.volume.time.time", return_value=110.0):
-        result = run_volume_tick(
-            cast=mock_cast,
-            interval_sec=60,
-            step=-0.04,
-            min_level=0.3,
-            inactive_threshold=3,
-            manual_rise_threshold=0.01,
-            state_file=seeded_state,
-            device_name="Living Room",
-        )
+        result = run_volume_tick(cast=mock_cast, config=make_tick_config(state_file=seeded_state))
 
     saved = load_state(seeded_state)
     assert result == "volume_down"
@@ -104,7 +95,7 @@ def test_run_volume_tick_detects_manual_raise_and_resets_streak(
 
 
 def test_run_volume_tick_reaches_inactive_threshold_and_standby(
-    seeded_state: Path, mock_cast: Mock
+    seeded_state: Path, mock_cast: Mock, make_tick_config
 ) -> None:
     """しきい値に達したら state を消して standby"""
     mock_cast.status.volume_level = 0.4
@@ -113,16 +104,7 @@ def test_run_volume_tick_reaches_inactive_threshold_and_standby(
         patch("nemucast.volume.time.time", return_value=110.0),
         patch("nemucast.cast_client.time.sleep"),
     ):
-        result = run_volume_tick(
-            cast=mock_cast,
-            interval_sec=60,
-            step=-0.04,
-            min_level=0.3,
-            inactive_threshold=3,
-            manual_rise_threshold=0.01,
-            state_file=seeded_state,
-            device_name="Living Room",
-        )
+        result = run_volume_tick(cast=mock_cast, config=make_tick_config(state_file=seeded_state))
 
     assert result == "standby"
     assert not seeded_state.exists()
@@ -130,7 +112,9 @@ def test_run_volume_tick_reaches_inactive_threshold_and_standby(
     mock_cast.set_volume.assert_not_called()
 
 
-def test_run_volume_tick_resets_stale_state(state_file: Path, mock_cast: Mock) -> None:
+def test_run_volume_tick_resets_stale_state(
+    state_file: Path, mock_cast: Mock, make_tick_config
+) -> None:
     """古い state は新しいセッションとして扱う"""
     from nemucast.state import save_state
 
@@ -147,16 +131,7 @@ def test_run_volume_tick_resets_stale_state(state_file: Path, mock_cast: Mock) -
     mock_cast.status.volume_level = 0.6
 
     with patch("nemucast.volume.time.time", return_value=200.0):
-        result = run_volume_tick(
-            cast=mock_cast,
-            interval_sec=60,
-            step=-0.04,
-            min_level=0.3,
-            inactive_threshold=3,
-            manual_rise_threshold=0.01,
-            state_file=state_file,
-            device_name="Living Room",
-        )
+        result = run_volume_tick(cast=mock_cast, config=make_tick_config())
 
     saved = load_state(state_file)
     assert result == "volume_down"
@@ -164,21 +139,14 @@ def test_run_volume_tick_resets_stale_state(state_file: Path, mock_cast: Mock) -
     assert saved["last_auto_volume"] == 0.56
 
 
-def test_run_volume_tick_keeps_volume_when_at_min_level(state_file: Path, mock_cast: Mock) -> None:
+def test_run_volume_tick_keeps_volume_when_at_min_level(
+    state_file: Path, mock_cast: Mock, make_tick_config
+) -> None:
     """最小音量以下なら据え置きで state だけ進める"""
     mock_cast.status.volume_level = 0.25
 
     with patch("nemucast.volume.time.time", return_value=100.0):
-        result = run_volume_tick(
-            cast=mock_cast,
-            interval_sec=60,
-            step=-0.04,
-            min_level=0.3,
-            inactive_threshold=3,
-            manual_rise_threshold=0.01,
-            state_file=state_file,
-            device_name="Living Room",
-        )
+        result = run_volume_tick(cast=mock_cast, config=make_tick_config())
 
     saved = load_state(state_file)
     assert result == "keep"
