@@ -10,8 +10,7 @@
 - `CHROMECAST_NAME`, `STEP`, `MIN_LEVEL`, `DEFAULT_INTERVAL_SEC`
 - `INACTIVE_THRESHOLD`, `MANUAL_RISE_THRESHOLD`, `DEFAULT_STATE_FILE`
 - `RUN_UNTIL_STANDBY`, `STATE_STALE_INTERVAL_MULTIPLIER`
-- `CRON_20_*`（`NAME`, `INTERVAL_SEC`, `INACTIVE_THRESHOLD`, `STEP`, `MIN_LEVEL`, `STATE_FILE`）
-- `CRON_0030_*`（同上）
+- `CRON_0030_*`（`NAME`, `INTERVAL_SEC`, `INACTIVE_THRESHOLD`, `STEP`, `MIN_LEVEL`, `STATE_FILE`）
 - `MAX_HISTORY_ENTRIES`
 
 ## `src/nemucast/state.py`
@@ -90,10 +89,21 @@ CLI エントリポイント、引数解析、ロギング設定。
 #### `main()`
 - 通常の `nemucast` エントリーポイント
 
-#### `main_cron_20()`
-- `nemucast-cron-20` 用エントリーポイント
-- `config.CRON_20_OVERRIDES` を渡し、20:00 に即 standby させるプロファイル
-
 #### `main_cron_0030()`
 - `nemucast-cron-0030` 用エントリーポイント
 - `config.CRON_0030_OVERRIDES` を渡し、15 分ごとに判定を継続して 45 分無操作なら standby にするプロファイル
+
+## `src/nemucast/standby.py`
+
+「20:00 になったら即電源OFF」のような時刻指定 standby を行う最小スクリプト。
+`cli.py` とは独立しており、音量制御や state 管理を持たない。
+
+#### `parse_args(args=None)`
+- `--name` のみを受け付ける薄い引数パーサ
+
+#### `setup_logging()`
+- `logs/standby.log` と標準出力にローテーション付きで出力する
+
+#### `main(args=None)`
+- `nemucast-standby` 用エントリーポイント
+- 指定デバイスを `discover_chromecasts` で発見し、`standby_device` を呼んで終了する

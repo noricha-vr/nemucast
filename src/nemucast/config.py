@@ -27,16 +27,6 @@ RUN_UNTIL_STANDBY = os.getenv("RUN_UNTIL_STANDBY", "0") == "1"
 STATE_STALE_INTERVAL_MULTIPLIER = int(os.getenv("STATE_STALE_INTERVAL_MULTIPLIER", "2"))
 
 # cron 起動用プロファイルの上書き値。CLI の default_overrides にそのまま渡す。
-CRON_20_OVERRIDES: dict[str, Any] = {
-    "name": os.getenv("CRON_20_NAME", CHROMECAST_NAME),
-    "interval": int(os.getenv("CRON_20_INTERVAL_SEC", "60")),
-    "step": float(os.getenv("CRON_20_STEP", str(STEP))),
-    "min_level": float(os.getenv("CRON_20_MIN_LEVEL", "0.05")),
-    "inactive_threshold": int(os.getenv("CRON_20_INACTIVE_THRESHOLD", "1")),
-    "state_file": os.getenv("CRON_20_STATE_FILE", f"{LOG_DIR}/activity_state_20.json"),
-    "run_until_standby": True,
-}
-
 CRON_0030_OVERRIDES: dict[str, Any] = {
     "name": os.getenv("CRON_0030_NAME", CHROMECAST_NAME),
     "interval": int(os.getenv("CRON_0030_INTERVAL_SEC", "900")),

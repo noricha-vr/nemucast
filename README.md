@@ -58,19 +58,17 @@ uv run nemucast --interval 900 --inactive-threshold 4
 uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 ```
 
-## 🕘 cron 用プロファイル
+## 🕘 タイマー用プロファイル
 
-### 20:00 用
+### 即時 standby（電源OFF相当）
 
-- コマンド: `nemucast-cron-20`
-- 既定値:
-  - `CRON_20_INTERVAL_SEC=60`
-  - `CRON_20_INACTIVE_THRESHOLD=1`
-  - `CRON_20_MIN_LEVEL=0.05`
-  - `CRON_20_STATE_FILE=logs/activity_state_20.json`
+- コマンド: `nemucast-standby`
 - 動き:
-  - 20:00 に起動したらすぐ非アクティブ判定に到達し、そのまま standby します
-  - 実質「20:00 になったらすぐ切る」プロファイルです
+  - 指定 Chromecast を発見して `quit_app` で即座に standby にします
+  - 音量制御や state ファイルは使わない、最小構成のスクリプトです
+- オプション:
+  - `--name`: 対象デバイス名（デフォルト: `CHROMECAST_NAME` 環境変数 / `Dell`）
+- 想定用途: 「20:00 になったら即切る」のような時刻指定の電源OFF
 
 ### 00:30 用
 
@@ -85,11 +83,20 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
   - 音量操作が 45 分間なければ standby します
   - 途中で手動で音量を上げたら、非アクティブ回数をリセットして継続します
 
-### cron 設定例
+### periodic-worker 登録例
 
-```cron
-0 20 * * * cd /path/to/nemucast && /path/to/.venv/bin/nemucast-cron-20 >> /path/to/nemucast/logs/cron-20.log 2>&1
-30 0 * * * cd /path/to/nemucast && /path/to/.venv/bin/nemucast-cron-0030 >> /path/to/nemucast/logs/cron-24.log 2>&1
+```bash
+# 20:00 に即 standby
+periodic-worker register \
+  --name nemucast-20 --cron "0 20 * * *" --tz Asia/Tokyo \
+  --cwd /path/to/nemucast \
+  --command "/path/to/.venv/bin/nemucast-standby"
+
+# 00:30 から音量を下げて寝かしつけ
+periodic-worker register \
+  --name nemucast-0030 --cron "30 0 * * *" --tz Asia/Tokyo \
+  --cwd /path/to/nemucast \
+  --command "/path/to/.venv/bin/nemucast-cron-0030"
 ```
 
 ## 🔧 動作の仕組み
@@ -128,27 +135,24 @@ stale 判定の条件: `now - updated_at > INTERVAL_SEC * STATE_STALE_INTERVAL_M
 
 ### プロファイル別の設定値対比
 
-同じロジックでも、プロファイルの設定値によって挙動が大きく変わります。
-
-| 項目 | 通常実行 (`nemucast`) | 20:00 用 (`cron-20`) | 00:30 用 (`cron-0030`) |
-|------|----------------------|----------------------|------------------------|
-| `INTERVAL_SEC` | 1200（20分） | 60（1分） | 900（15分） |
-| `INACTIVE_THRESHOLD` | 3 | 1 | 4 |
-| `MIN_LEVEL` | 0.3 | 0.05 | 0.35 |
-| standby までの最短時間 | 約 40 分（3 tick） | 即時（1 tick） | 約 45 分（4 tick） |
+| 項目 | 通常実行 (`nemucast`) | 即時 standby (`nemucast-standby`) | 00:30 用 (`cron-0030`) |
+|------|----------------------|----------------------------------|------------------------|
+| `INTERVAL_SEC` | 1200（20分） | -（音量制御なし） | 900（15分） |
+| `INACTIVE_THRESHOLD` | 3 | -（即 standby） | 4 |
+| `MIN_LEVEL` | 0.3 | -（音量制御なし） | 0.35 |
+| standby までの最短時間 | 約 40 分（3 tick） | 即時 | 約 45 分（4 tick） |
 | 用途 | 任意のタイミングで段階的に静音化 | 「20:00 になったら即切る」運用 | 深夜 00:30 以降、徐々に下げて自然に切る運用 |
 
-- `cron-20` は `INACTIVE_THRESHOLD=1` なので、起動 1 回目のチェックで即 standby に到達します。
+- `nemucast-standby` は音量を触らず `quit_app` だけ呼ぶ最小スクリプトです。
 - `cron-0030` は 15 分刻みで 4 回まで音量を下げながら待つため、途中で手動で音量を上げれば streak がリセットされ、視聴を続けられます。
 
 ## 📝 ログと state
 
 - 実行ログ: `logs/lower_cast_volume.log`
-- 20:00 用ログ例: `logs/cron-20.log`
+- 即時 standby 用ログ: `logs/standby.log`
 - 00:30 用ログ例: `logs/cron-24.log`
 - state:
   - 通常実行 `logs/activity_state.json`
-  - 20:00 用 `logs/activity_state_20.json`
   - 00:30 用 `logs/activity_state_0030.json`
 
 ## ✅ テスト

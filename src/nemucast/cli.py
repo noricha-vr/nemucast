@@ -14,7 +14,6 @@ from nemucast.cast_client import discover_chromecasts, stop_discovery
 from nemucast.config import (
     CHROMECAST_NAME,
     CRON_0030_OVERRIDES,
-    CRON_20_OVERRIDES,
     DEFAULT_INTERVAL_SEC,
     DEFAULT_STATE_FILE,
     INACTIVE_THRESHOLD,
@@ -180,11 +179,6 @@ def run_with_args(
 
 def main() -> None:
     run_with_args()
-
-
-def main_cron_20() -> None:
-    """20:00 用の即時 standby プロファイル"""
-    run_with_args(default_overrides=CRON_20_OVERRIDES)
 
 
 def main_cron_0030() -> None:
