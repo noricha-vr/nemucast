@@ -13,7 +13,6 @@ from typing import Any
 from nemucast.cast_client import discover_chromecasts, stop_discovery
 from nemucast.config import (
     CHROMECAST_NAME,
-    CRON_0030_OVERRIDES,
     DEFAULT_INTERVAL_SEC,
     DEFAULT_STATE_FILE,
     INACTIVE_THRESHOLD,
@@ -179,11 +178,6 @@ def run_with_args(
 
 def main() -> None:
     run_with_args()
-
-
-def main_cron_0030() -> None:
-    """00:30 用の 15 分間隔プロファイル"""
-    run_with_args(default_overrides=CRON_0030_OVERRIDES)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from nemucast.cli import main, main_cron_0030
+from nemucast.cli import main
 
 
 class TestMainFlow:
@@ -53,12 +53,3 @@ class TestMainFlow:
         mock_cast.wait.assert_called_once()
         mock_run_volume_session.assert_called_once()
 
-    @patch("nemucast.cli.run_with_args")
-    def test_main_cron_0030_uses_schedule_defaults(self, mock_run_with_args):
-        """00:30プロファイルを使う"""
-        main_cron_0030()
-
-        overrides = mock_run_with_args.call_args.kwargs["default_overrides"]
-        assert overrides["interval"] == 900
-        assert overrides["inactive_threshold"] == 4
-        assert overrides["run_until_standby"] is True

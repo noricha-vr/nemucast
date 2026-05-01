@@ -23,7 +23,7 @@ package = true
 [project.scripts]
 nemucast = "nemucast.cli:main"
 nemucast-standby = "nemucast.standby:main"
-nemucast-cron-0030 = "nemucast.cli:main_cron_0030"
+nemucast-auto = "nemucast.auto_standby:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -100,7 +100,6 @@ def test_parse_args_invalid(argv, message, capsys):
 def test_cli_module_exposes_entrypoints():
     """後方互換の sanity check: CLI エントリが cli モジュールから参照できる"""
     assert callable(cli_module.main)
-    assert callable(cli_module.main_cron_0030)
 
 
 def test_parse_args_return_annotation():

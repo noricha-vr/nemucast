@@ -25,15 +25,6 @@ def test_setup_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert (tmp_path / "logs").exists()
 
 
-def test_cron_0030_overrides_defaults() -> None:
-    """cron-0030 プロファイルの既定値"""
-    assert config_module.CRON_0030_OVERRIDES["name"] == "Dell"
-    assert config_module.CRON_0030_OVERRIDES["interval"] == 900
-    assert config_module.CRON_0030_OVERRIDES["inactive_threshold"] == 4
-    assert config_module.CRON_0030_OVERRIDES["state_file"] == "logs/activity_state_0030.json"
-    assert config_module.CRON_0030_OVERRIDES["run_until_standby"] is True
-
-
 def test_log_dir_default() -> None:
     """LOG_DIR のデフォルトは 'logs'"""
     assert config_module.LOG_DIR == "logs"

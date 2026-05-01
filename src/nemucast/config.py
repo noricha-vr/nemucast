@@ -7,7 +7,6 @@ CLI / state 管理 / Chromecast 接続の各モジュールはここを参照す
 from __future__ import annotations
 
 import os
-from typing import Any
 
 from dotenv import load_dotenv
 
@@ -25,17 +24,6 @@ MANUAL_RISE_THRESHOLD = float(os.getenv("MANUAL_RISE_THRESHOLD", "0.01"))
 DEFAULT_STATE_FILE = os.getenv("STATE_FILE", f"{LOG_DIR}/activity_state.json")
 RUN_UNTIL_STANDBY = os.getenv("RUN_UNTIL_STANDBY", "0") == "1"
 STATE_STALE_INTERVAL_MULTIPLIER = int(os.getenv("STATE_STALE_INTERVAL_MULTIPLIER", "2"))
-
-# cron 起動用プロファイルの上書き値。CLI の default_overrides にそのまま渡す。
-CRON_0030_OVERRIDES: dict[str, Any] = {
-    "name": os.getenv("CRON_0030_NAME", CHROMECAST_NAME),
-    "interval": int(os.getenv("CRON_0030_INTERVAL_SEC", "900")),
-    "step": float(os.getenv("CRON_0030_STEP", str(STEP))),
-    "min_level": float(os.getenv("CRON_0030_MIN_LEVEL", "0.35")),
-    "inactive_threshold": int(os.getenv("CRON_0030_INACTIVE_THRESHOLD", "4")),
-    "state_file": os.getenv("CRON_0030_STATE_FILE", f"{LOG_DIR}/activity_state_0030.json"),
-    "run_until_standby": True,
-}
 
 # Chromecast を quit_app した後、standby 完了を待つ秒数
 STANDBY_WAIT_SEC = int(os.getenv("STANDBY_WAIT_SEC", "2"))

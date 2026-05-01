@@ -70,18 +70,20 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
   - `--name`: 対象デバイス名（デフォルト: `CHROMECAST_NAME` 環境変数 / `Dell`）
 - 想定用途: 「20:00 になったら即切る」のような時刻指定の電源OFF
 
-### 00:30 用
+### 自動寝かしつけ（24h タイマー）
 
-- コマンド: `nemucast-cron-0030`
-- 既定値:
-  - `CRON_0030_INTERVAL_SEC=900`
-  - `CRON_0030_INACTIVE_THRESHOLD=4`
-  - `CRON_0030_MIN_LEVEL=0.35`
-  - `CRON_0030_STATE_FILE=logs/activity_state_0030.json`
+- コマンド: `nemucast-auto`
+- 想定実行: 15 分間隔で常時稼働 (periodic-worker `--every 15m`)
 - 動き:
-  - 15分ごとに音量を下げながら判定を継続します
-  - 音量操作が 45 分間なければ standby します
-  - 途中で手動で音量を上げたら、非アクティブ回数をリセットして継続します
+  1. 直前 tick で電源OFFしていて、音量が上がっていなければ何もしない
+  2. 直前 script が下げた音量より上がっていれば「視聴中」と判定し、連続下げカウントを 0 に戻す
+  3. 連続下げカウントが `AUTO_LOWERED_THRESHOLD` (既定 3) 以上なら `quit_app` で電源OFF
+  4. それ以外は音量を `STEP` (既定 -0.04) だけ下げる。`AUTO_MIN_LEVEL` (既定 0.05) 以下なら下げないがカウントは進める
+- 環境変数:
+  - `AUTO_LOWERED_THRESHOLD`: 電源OFFまでの連続下げ回数。既定 `3`
+  - `AUTO_MIN_LEVEL`: 下限音量。既定 `0.05`
+  - `AUTO_STATE_FILE`: state ファイルパス。既定 `logs/auto_standby_state.json`
+  - `STEP`, `MANUAL_RISE_THRESHOLD`, `CHROMECAST_NAME` は他コマンドと共通
 
 ### periodic-worker 登録例
 
@@ -92,68 +94,56 @@ periodic-worker register \
   --cwd /path/to/nemucast \
   --command "/path/to/.venv/bin/nemucast-standby"
 
-# 00:30 から音量を下げて寝かしつけ
+# 24h、15分間隔で寝かしつけ
 periodic-worker register \
-  --name nemucast-0030 --cron "30 0 * * *" --tz Asia/Tokyo \
+  --name nemucast-auto --every 15m \
   --cwd /path/to/nemucast \
-  --command "/path/to/.venv/bin/nemucast-cron-0030"
+  --command "/path/to/.venv/bin/nemucast-auto"
 ```
 
-## 🔧 動作の仕組み
-
-1. Chromecast に接続
-2. state JSON から `last_auto_volume` と `inactive_streak` を読む
-3. 現在音量が `last_auto_volume + MANUAL_RISE_THRESHOLD` を超えていれば活動あり
-4. 活動ありなら streak を `0` に戻す
-5. 活動なしなら streak を `+1`
-6. しきい値未満なら音量を 1 回下げる
-7. しきい値以上なら standby にして state を削除する
-
-### フロー図
+## 🔧 nemucast-auto の動作の仕組み
 
 ```mermaid
 flowchart TD
-    Start([cron / CLI 起動]) --> Connect[Chromecast 接続]
-    Connect --> LoadState{state JSON<br/>存在かつ有効?}
-    LoadState -->|なし or stale| NewSession[新セッション<br/>state 初期化]
-    LoadState -->|あり| CheckVolume[現在音量を取得]
-    NewSession --> CheckVolume
-    CheckVolume --> Manual{current &gt;<br/>last_auto_volume +<br/>MANUAL_RISE_THRESHOLD?}
-    Manual -->|Yes 手動上昇| Reset[inactive_streak = 0<br/>活動あり]
-    Manual -->|No| Increment[inactive_streak += 1<br/>非アクティブ]
-    Reset --> SaveState[state 保存]
-    Increment --> Threshold{inactive_streak &gt;=<br/>INACTIVE_THRESHOLD?}
-    Threshold -->|Yes| Standby[quit_app で standby<br/>state 削除]
-    Threshold -->|No| LowerVol[音量を STEP 分下げる<br/>MIN_LEVEL でクリップ]
-    LowerVol --> SaveState
-    Standby --> End([終了])
-    SaveState --> End
+    Start([15分タイマー]) --> Connect[Chromecast 接続]
+    Connect --> CurVol[現在音量を取得]
+    CurVol --> PoweredOff{state.powered_off?}
+    PoweredOff -->|Yes| Risen{current &gt;<br/>volume_at_power_off +<br/>RISE_THRESHOLD?}
+    Risen -->|No| Skip[何もしない]
+    Risen -->|Yes 視聴再開| Reset1[state を初期化]
+    Reset1 --> ManualCheck
+    PoweredOff -->|No| ManualCheck{current &gt;<br/>last_lowered_to +<br/>RISE_THRESHOLD?}
+    ManualCheck -->|Yes 手動上昇| ResetCount[consecutive_lowered = 0]
+    ManualCheck -->|No| Threshold
+    ResetCount --> Threshold{consecutive_lowered &gt;=<br/>AUTO_LOWERED_THRESHOLD?}
+    Threshold -->|Yes| Standby[quit_app<br/>powered_off=true<br/>volume_at_power_off=current]
+    Threshold -->|No| LowerVol[音量を STEP 分下げる<br/>AUTO_MIN_LEVEL でクリップ<br/>count += 1]
+    LowerVol --> SaveState[state 保存]
+    Standby --> SaveState
+    SaveState --> End([終了])
+    Skip --> End
 ```
 
-stale 判定の条件: `now - updated_at > INTERVAL_SEC * STATE_STALE_INTERVAL_MULTIPLIER`（既定 2 倍）。
-これを超えると state は破棄され、新セッションとして `inactive_streak = 0` から再スタートします。
+「カウントが先 → 下げ判定が後」なので、初期 `consecutive_lowered = 0` から始めて 3 tick 下げ、4 tick 目で電源OFF。15 分間隔なら **下げ始めから約 45 分後に電源OFF** に到達する。
 
-### プロファイル別の設定値対比
+### コマンド別の対比
 
-| 項目 | 通常実行 (`nemucast`) | 即時 standby (`nemucast-standby`) | 00:30 用 (`cron-0030`) |
-|------|----------------------|----------------------------------|------------------------|
-| `INTERVAL_SEC` | 1200（20分） | -（音量制御なし） | 900（15分） |
-| `INACTIVE_THRESHOLD` | 3 | -（即 standby） | 4 |
-| `MIN_LEVEL` | 0.3 | -（音量制御なし） | 0.35 |
-| standby までの最短時間 | 約 40 分（3 tick） | 即時 | 約 45 分（4 tick） |
-| 用途 | 任意のタイミングで段階的に静音化 | 「20:00 になったら即切る」運用 | 深夜 00:30 以降、徐々に下げて自然に切る運用 |
-
-- `nemucast-standby` は音量を触らず `quit_app` だけ呼ぶ最小スクリプトです。
-- `cron-0030` は 15 分刻みで 4 回まで音量を下げながら待つため、途中で手動で音量を上げれば streak がリセットされ、視聴を続けられます。
+| 項目 | `nemucast-standby` | `nemucast-auto` | `nemucast`（手動） |
+|------|--------------------|------------------|--------------------|
+| 想定スケジュール | 時刻指定（例: 20:00） | 15分間隔・24h | 任意のタイミングで手動実行 |
+| 音量制御 | しない | する | する |
+| state | 持たない | `auto_standby_state.json` | `activity_state.json` |
+| 電源OFF条件 | 即時 | 連続 3 tick 下げ続けた次回 | 連続 N tick 非アクティブ |
+| 用途 | ハードな時刻カットオフ | 寝落ち検知の自動運転 | デバッグ・手動投入 |
 
 ## 📝 ログと state
 
-- 実行ログ: `logs/lower_cast_volume.log`
-- 即時 standby 用ログ: `logs/standby.log`
-- 00:30 用ログ例: `logs/cron-24.log`
+- 即時 standby ログ: `logs/standby.log`
+- 自動寝かしつけログ: `logs/auto_standby.log`
+- 手動実行ログ: `logs/lower_cast_volume.log`
 - state:
-  - 通常実行 `logs/activity_state.json`
-  - 00:30 用 `logs/activity_state_0030.json`
+  - `nemucast-auto` → `logs/auto_standby_state.json`
+  - `nemucast`（手動） → `logs/activity_state.json`
 
 ## ✅ テスト
 
