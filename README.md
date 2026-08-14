@@ -86,6 +86,8 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
   - `AUTO_STATE_FILE`: state ファイルパス。既定 `logs/auto_standby_state.json`
   - `AUTO_STATE_STALE_SEC`: これ以上間が空いた state は連続カウントを捨てる秒数。既定 `1800`（15分 x 2）
   - `STEP`, `MANUAL_RISE_THRESHOLD`, `CHROMECAST_NAME` は他コマンドと共通
+- 終了コード: デバイスが見つからない場合は「寝かしつける対象がない」とみなして正常終了する（見つからない状態の方が長いため、失敗扱いにするとスケジューラの通知が埋もれる）
+- 注意: 活動シグナルは音量変化と active app だけなので、音量に触れずに視聴し続けると時間帯を問わず約 45 分（15 分 x 3）で `quit_app` される
 - state の扱い:
   - Mac のスリープ等でスケジューラが止まると連続カウントが実態とずれるため、`AUTO_STATE_STALE_SEC` を超えて間が空いた state はカウントを捨てて数え直す（視聴再開直後に電源OFFされるのを防ぐ）
   - 電源OFF状態だけは時間が空いても維持する（音量上昇 / active app を見るまで何もしない）

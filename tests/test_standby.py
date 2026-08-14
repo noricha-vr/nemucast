@@ -2,49 +2,28 @@
 
 from __future__ import annotations
 
-from unittest.mock import Mock, patch
-
-import pytest
+from collections.abc import Callable
+from typing import Any
+from unittest.mock import patch
 
 from nemucast.standby import main
 
 
 class TestStandby:
-    @patch("nemucast.standby.stop_discovery")
-    @patch("nemucast.standby.standby_device")
-    @patch("nemucast.standby.discover_chromecasts")
-    def test_main_invokes_standby(
-        self,
-        mock_discover: Mock,
-        mock_standby: Mock,
-        mock_stop: Mock,
+    def test_main_puts_device_to_standby(self, fake_network: Callable[[list[str]], Any]) -> None:
+        """対象デバイスが見つかれば quit_app して discovery を閉じる"""
+        with fake_network(["Living Room"]) as network:
+            with patch("nemucast.cast_client.time.sleep"):
+                main(args=["--name", "Living Room"])
+
+        network["casts"]["Living Room"].quit_app.assert_called_once()
+        network["browser"].stop_discovery.assert_called_once()
+
+    def test_main_succeeds_when_device_absent(
+        self, fake_network: Callable[[list[str]], Any]
     ) -> None:
-        mock_cast = Mock()
-        mock_browser = Mock()
-        mock_discover.return_value = (mock_cast, mock_browser)
-
-        main(args=["--name", "Living Room"])
-
-        mock_discover.assert_called_once_with("Living Room")
-        mock_cast.wait.assert_called_once()
-        mock_standby.assert_called_once_with(mock_cast)
-        mock_stop.assert_called_once_with(mock_browser)
-
-    @patch("nemucast.standby.stop_discovery")
-    @patch("nemucast.standby.standby_device")
-    @patch("nemucast.standby.discover_chromecasts")
-    def test_main_exits_when_chromecast_missing(
-        self,
-        mock_discover: Mock,
-        mock_standby: Mock,
-        mock_stop: Mock,
-    ) -> None:
-        mock_browser = Mock()
-        mock_discover.return_value = (None, mock_browser)
-
-        with pytest.raises(SystemExit) as exc_info:
+        """デバイス不在は失敗ではない（TV が消えている日に cron が偽アラートを出さないこと）"""
+        with fake_network(["OtherDevice"]) as network:
             main(args=["--name", "Missing"])
 
-        assert exc_info.value.code == 1
-        mock_standby.assert_not_called()
-        mock_stop.assert_called_once_with(mock_browser)
+        network["browser"].stop_discovery.assert_called_once()

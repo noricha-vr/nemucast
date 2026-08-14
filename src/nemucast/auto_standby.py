@@ -32,6 +32,7 @@ from nemucast.cast_client import (
 )
 from nemucast.config import (
     CHROMECAST_NAME,
+    CONNECT_TIMEOUT_SEC,
     LOG_DIR,
     LOG_ROTATION_BACKUP_COUNT,
     LOG_ROTATION_MAX_BYTES,
@@ -217,11 +218,17 @@ def main(args: list[str] | None = None) -> None:
 
     cast, browser = discover_chromecasts(parsed.name)
     if cast is None:
+        # 24時間 15分間隔で回すため、デバイスが mDNS に出ない時間帯の方が長い。
+        # 「寝かしつける対象がない = やることがない」は成功扱いにしないと、
+        # 1日最大96回の失敗通知で本物の障害が埋もれる。
+        logging.warning("デバイス '%s' が見つからないため何もしません。", parsed.name)
         stop_discovery(browser)
-        raise SystemExit(1)
+        return
 
     try:
-        cast.wait()
+        # timeout なしだと discovery 後に落ちたデバイス相手に無限待ちになり、
+        # 15分ごとにプロセスが積み上がる
+        cast.wait(timeout=CONNECT_TIMEOUT_SEC)
         state = load_state(AUTO_STATE_FILE, parsed.name) or fresh_state(parsed.name)
         result, new_state = run_tick(cast=cast, state=state)
         save_state(AUTO_STATE_FILE, new_state)

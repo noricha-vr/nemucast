@@ -13,6 +13,7 @@ from typing import Any
 from nemucast.cast_client import discover_chromecasts, stop_discovery
 from nemucast.config import (
     CHROMECAST_NAME,
+    CONNECT_TIMEOUT_SEC,
     DEFAULT_INTERVAL_SEC,
     DEFAULT_STATE_FILE,
     INACTIVE_THRESHOLD,
@@ -150,7 +151,7 @@ def run_with_args(
 
     try:
         logging.info("接続完了: %s (%s)", cast.cast_info.friendly_name, cast.cast_info.host)
-        cast.wait()
+        cast.wait(timeout=CONNECT_TIMEOUT_SEC)
         config = VolumeSessionConfig(
             interval_sec=parsed.interval,
             step=parsed.step,

@@ -28,6 +28,9 @@ STATE_STALE_INTERVAL_MULTIPLIER = int(os.getenv("STATE_STALE_INTERVAL_MULTIPLIER
 # Chromecast を quit_app した後、standby 完了を待つ秒数
 STANDBY_WAIT_SEC = int(os.getenv("STANDBY_WAIT_SEC", "2"))
 
+# 接続確立（cast.wait）を待つ秒数。省略すると無限待ちになるため必ず指定する
+CONNECT_TIMEOUT_SEC = int(os.getenv("CONNECT_TIMEOUT_SEC", "30"))
+
 # ログファイルのローテーション設定
 LOG_ROTATION_MAX_BYTES = int(os.getenv("LOG_ROTATION_MAX_BYTES", str(512 * 1024)))
 LOG_ROTATION_BACKUP_COUNT = int(os.getenv("LOG_ROTATION_BACKUP_COUNT", "1"))

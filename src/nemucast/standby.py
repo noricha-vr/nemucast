@@ -15,6 +15,7 @@ from pathlib import Path
 from nemucast.cast_client import discover_chromecasts, standby_device, stop_discovery
 from nemucast.config import (
     CHROMECAST_NAME,
+    CONNECT_TIMEOUT_SEC,
     LOG_DIR,
     LOG_ROTATION_BACKUP_COUNT,
     LOG_ROTATION_MAX_BYTES,
@@ -57,11 +58,15 @@ def main(args: list[str] | None = None) -> None:
 
     cast, browser = discover_chromecasts(parsed.name)
     if cast is None:
+        # デバイスが mDNS に出ない = 既に消えている。standby させる対象がないので成功扱いにする
+        # （毎日 20:00 の cron が TV OFF の日に失敗通知を出すのを防ぐ）
+        logging.warning("デバイス '%s' が見つからないため何もしません。", parsed.name)
         stop_discovery(browser)
-        raise SystemExit(1)
+        return
 
     try:
-        cast.wait()
+        # timeout なしだと接続確立を無限に待つ
+        cast.wait(timeout=CONNECT_TIMEOUT_SEC)
         standby_device(cast)
     finally:
         stop_discovery(browser)

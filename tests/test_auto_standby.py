@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -237,20 +239,39 @@ class TestStatePersistence:
 
 
 class TestMain:
-    def test_main_exits_when_chromecast_missing(
+    def test_main_succeeds_when_chromecast_missing(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        fake_network: Callable[[list[str]], Any],
     ) -> None:
+        """デバイス不在は失敗ではない（15分ごとの偽アラートを出さないこと）"""
         from nemucast import auto_standby
 
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(auto_standby, "discover_chromecasts", Mock(return_value=(None, Mock())))
-        stop_mock = Mock()
-        monkeypatch.setattr(auto_standby, "stop_discovery", stop_mock)
-
-        with pytest.raises(SystemExit) as exc_info:
+        with fake_network(["OtherDevice"]) as network:
             auto_standby.main(args=["--name", "Missing"])
 
-        assert exc_info.value.code == 1
-        stop_mock.assert_called_once()
+        network["browser"].stop_discovery.assert_called_once()
+
+    def test_main_persists_tick_result(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_network: Callable[[list[str]], Any],
+    ) -> None:
+        """cron から叩かれる経路（探索 → tick → state 書き出し）が繋がっている"""
+        from nemucast import auto_standby
+
+        monkeypatch.chdir(tmp_path)
+        state_file = tmp_path / "auto_state.json"
+        monkeypatch.setattr(auto_standby, "AUTO_STATE_FILE", state_file)
+
+        with fake_network(["Dell"]) as network:
+            network["casts"]["Dell"].status.volume_level = 0.5
+            auto_standby.main(args=["--name", "Dell"])
+
+        saved = json.loads(state_file.read_text(encoding="utf-8"))
+        assert saved["device_name"] == "Dell"
+        assert saved["consecutive_lowered"] == 1
+        assert saved["last_lowered_to"] == pytest.approx(0.46)
