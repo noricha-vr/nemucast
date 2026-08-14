@@ -16,7 +16,7 @@ AI エージェント（Claude Code / Codex 等）がこのリポジトリを操
 | Lint / Format | ruff（`select = ["E", "F", "I", "N", "W", "UP"]`, line-length 100） |
 | pre-commit | ruff-check --fix / ruff-format --check |
 | CI | `.github/workflows/ci.yaml`（push/PR で ruff + pytest を実行） |
-| エントリポイント | `nemucast` / `nemucast-cron-20` / `nemucast-cron-0030` |
+| エントリポイント | `nemucast` / `nemucast-standby` / `nemucast-auto` |
 
 ## プロジェクト概要
 
@@ -27,13 +27,15 @@ Chromecast の active / idle 判定には依存せず、`前回自動設定し�
 
 | パス | 役割 |
 |------|------|
-| `src/nemucast/cli.py` | CLI エントリポイント（`main` / `main_cron_20` / `main_cron_0030`）、argparse、ロギング設定 |
-| `src/nemucast/config.py` | 環境変数から読み込む設定定数と `CRON_*_OVERRIDES`（cron プロファイル用の既定値上書き） |
+| `src/nemucast/cli.py` | `nemucast`（手動実行）のエントリポイント、argparse、ロギング設定 |
+| `src/nemucast/standby.py` | `nemucast-standby` のエントリポイント。発見 → `quit_app` → 終了だけを行う |
+| `src/nemucast/auto_standby.py` | `nemucast-auto` のエントリポイント。1 tick 分の最小ロジック（下げる / 電源OFF / 何もしない） |
+| `src/nemucast/config.py` | 環境変数から読み込む設定定数 |
 | `src/nemucast/cast_client.py` | Chromecast の検索・接続・standby 制御 |
-| `src/nemucast/state.py` | 活動判定 state JSON の読み書き・整合性判定 |
-| `src/nemucast/volume.py` | 音量計算と 1 tick 分の制御ループ（`VolumeSessionConfig` / `TickResult`） |
+| `src/nemucast/state.py` | 活動判定 state JSON の読み書き・整合性判定（`nemucast` 手動実行用） |
+| `src/nemucast/volume.py` | 音量計算と 1 tick 分の制御ループ（`VolumeSessionConfig` / `TickResult`。`nemucast` 手動実行用） |
 | `src/nemucast/__main__.py` | `python -m nemucast` 用のエントリ |
-| `tests/` | pytest テスト。`conftest.py`（共通 fixture）と `test_args.py` / `test_volume_control.py` / `test_state.py` / `test_volume.py` / `test_cast_client.py` / `test_cli.py` に分割 |
+| `tests/` | pytest テスト。`conftest.py`（共通 fixture）と `test_args.py` / `test_volume_control.py` / `test_state.py` / `test_volume.py` / `test_cast_client.py` / `test_cli.py` / `test_standby.py` / `test_auto_standby.py` に分割 |
 | `logs/` | 実行ログ（`lower_cast_volume.log`）と state JSON。Git 管理外 |
 | `docs/` | 永続ドキュメント。`docs/tmp/` は一時ドキュメント（Git 管理外） |
 | `.github/workflows/ci.yaml` | ruff + pytest を実行する CI |
@@ -58,23 +60,35 @@ uv run ruff format --check  # CI / pre-commit と同じチェック
 uv run pre-commit run --all-files
 
 # CLI 実行
-uv run nemucast
+uv run nemucast-auto          # 1 tick 分の自動寝かしつけ（periodic-worker が 15 分間隔で叩く）
+uv run nemucast-standby       # 発見して quit_app するだけ
+uv run nemucast               # 手動デバッグ用
 uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 ```
 
 ## CLI エントリポイント
 
-| コマンド | 用途 | 既定プロファイル |
-|----------|------|------------------|
-| `nemucast` | 汎用。1回の tick 実行または `--run-until-standby` で継続実行 | `INTERVAL_SEC=1200`, `INACTIVE_THRESHOLD=3`, `STATE_FILE=logs/activity_state.json` |
-| `nemucast-cron-20` | 20:00 用。起動直後に即 standby する運用向け | `INTERVAL_SEC=60`, `INACTIVE_THRESHOLD=1`, `MIN_LEVEL=0.05`, `STATE_FILE=logs/activity_state_20.json` |
-| `nemucast-cron-0030` | 00:30 用。15 分ごとに音量を下げながら 45 分で standby する運用向け | `INTERVAL_SEC=900`, `INACTIVE_THRESHOLD=4`, `MIN_LEVEL=0.35`, `STATE_FILE=logs/activity_state_0030.json` |
-
-プロファイル別の上書きは `CRON_20_*` / `CRON_0030_*` 環境変数で行う。詳細は `.env.example`。
+| コマンド | 用途 | 主な設定 |
+|----------|------|----------|
+| `nemucast-auto` | 常用。periodic-worker から 15 分間隔・24 時間で実行し、音量を下げながら自動で電源OFFにする | `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json` |
+| `nemucast-standby` | 20:00 用。発見して `quit_app` するだけ。音量制御も state も持たない | `CHROMECAST_NAME` のみ |
+| `nemucast` | 手動デバッグ用。1回の tick 実行または `--run-until-standby` で継続実行 | `INTERVAL_SEC=1200`, `INACTIVE_THRESHOLD=3`, `STATE_FILE=logs/activity_state.json` |
 
 ## state ファイル
 
-活動判定は `logs/activity_state*.json` に保存した状態から算出する。
+state を持つのは `nemucast-auto` と `nemucast`（手動）の 2 つで、ファイルは分ける。
+
+`nemucast-auto`（`logs/auto_standby_state.json`）:
+
+| キー | 意味 |
+|------|------|
+| `last_lowered_to` | 直近で自動設定した音量 |
+| `consecutive_lowered` | 連続で音量を下げた回数。`AUTO_LOWERED_THRESHOLD` に達したら `quit_app` |
+| `powered_off` | 電源OFF済みか。true の間は音量上昇を検知するまで何もしない |
+| `volume_at_power_off` | 電源OFF時点の音量。再開判定の基準値 |
+| `updated_at` | 最終更新時刻（UNIX 秒） |
+
+`nemucast`（`logs/activity_state.json`）:
 
 | キー | 意味 |
 |------|------|
@@ -82,9 +96,8 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 | `inactive_streak` | 連続で非アクティブと判定された回数 |
 | `updated_at` | 最終更新時刻（UNIX 秒） |
 
-- stale 判定: `now - updated_at > INTERVAL_SEC * STATE_STALE_INTERVAL_MULTIPLIER`（既定 2 倍）を超えたら破棄して再スタート
+- stale 判定（`nemucast` のみ）: `now - updated_at > INTERVAL_SEC * STATE_STALE_INTERVAL_MULTIPLIER`（既定 2 倍）を超えたら破棄して再スタート
 - standby 実行時は state を削除し、次回起動時にクリーンな状態から開始する
-- cron プロファイル間で state を共有しないよう、プロファイルごとにファイルを分ける
 
 ## 環境変数
 
