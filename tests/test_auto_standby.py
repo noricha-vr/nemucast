@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -187,6 +188,52 @@ class TestStatePersistence:
         loaded = load_state(path, "Dell")
         assert loaded is not None
         assert loaded["updated_at"] >= original_ts
+
+    def test_broken_state_starts_over_instead_of_crashing(self, tmp_path: Path) -> None:
+        """壊れた state を読んでも例外を投げない（毎 tick クラッシュして永久停止しないこと）"""
+        path = tmp_path / "state.json"
+        path.write_text('{"device_name": "Dell", ', encoding="utf-8")
+
+        assert load_state(path, "Dell") is None
+
+    def test_save_state_leaves_no_temp_file(self, tmp_path: Path) -> None:
+        """一時ファイル経由で置き換えても後片付けされる"""
+        path = tmp_path / "state.json"
+        save_state(path, fresh_state("Dell"))
+
+        assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
+
+    def test_stale_state_resets_lowered_count(self, tmp_path: Path) -> None:
+        """長時間空いた state は連続カウントを捨てる（再開直後に quit_app しないこと）"""
+        path = tmp_path / "state.json"
+        state = fresh_state("Dell")
+        state["consecutive_lowered"] = 2
+        state["last_lowered_to"] = 0.4
+        save_state(path, state)
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state["updated_at"] = time.time() - 3600
+        path.write_text(json.dumps(state), encoding="utf-8")
+
+        loaded = load_state(path, "Dell")
+
+        assert loaded is not None
+        assert loaded["consecutive_lowered"] == 0
+        assert loaded["last_lowered_to"] is None
+
+    def test_stale_state_keeps_powered_off(self, tmp_path: Path) -> None:
+        """電源OFF状態は時間が空いても維持する（勝手に音量を下げ直さないこと）"""
+        path = tmp_path / "state.json"
+        state = fresh_state("Dell")
+        state["powered_off"] = True
+        state["volume_at_power_off"] = 0.5
+        state["updated_at"] = time.time() - 86400
+        path.write_text(json.dumps(state), encoding="utf-8")
+
+        loaded = load_state(path, "Dell")
+
+        assert loaded is not None
+        assert loaded["powered_off"] is True
+        assert loaded["volume_at_power_off"] == 0.5
 
 
 class TestMain:

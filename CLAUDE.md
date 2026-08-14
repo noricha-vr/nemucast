@@ -70,7 +70,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 
 | コマンド | 用途 | 主な設定 |
 |----------|------|----------|
-| `nemucast-auto` | 常用。periodic-worker から 15 分間隔・24 時間で実行し、音量を下げながら自動で電源OFFにする | `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json` |
+| `nemucast-auto` | 常用。periodic-worker から 15 分間隔・24 時間で実行し、音量を下げながら自動で電源OFFにする | `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800` |
 | `nemucast-standby` | 20:00 用。発見して `quit_app` するだけ。音量制御も state も持たない | `CHROMECAST_NAME` のみ |
 | `nemucast` | 手動デバッグ用。1回の tick 実行または `--run-until-standby` で継続実行 | `INTERVAL_SEC=1200`, `INACTIVE_THRESHOLD=3`, `STATE_FILE=logs/activity_state.json` |
 
@@ -96,7 +96,10 @@ state を持つのは `nemucast-auto` と `nemucast`（手動）の 2 つで、�
 | `inactive_streak` | 連続で非アクティブと判定された回数 |
 | `updated_at` | 最終更新時刻（UNIX 秒） |
 
-- stale 判定（`nemucast` のみ）: `now - updated_at > INTERVAL_SEC * STATE_STALE_INTERVAL_MULTIPLIER`（既定 2 倍）を超えたら破棄して再スタート
+- stale 判定
+  - `nemucast`: `now - updated_at > INTERVAL_SEC * STATE_STALE_INTERVAL_MULTIPLIER`（既定 2 倍）を超えたら破棄して再スタート
+  - `nemucast-auto`: `AUTO_STATE_STALE_SEC`（既定 1800 秒）を超えたら連続カウントを捨てる。ただし `powered_off` は維持する（「音量上昇 / active app まで何もしない」が不変条件のため）
+- state が壊れて読めない場合は作り直して続行する（毎 tick 例外で落ちて自力復帰できなくなるのを防ぐ）。書き込みは一時ファイル + `os.replace` でアトミックに行う
 - standby 実行時は state を削除し、次回起動時にクリーンな状態から開始する
 
 ## 環境変数

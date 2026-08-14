@@ -84,7 +84,12 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
   - `AUTO_LOWERED_THRESHOLD`: 電源OFFまでの連続下げ回数。既定 `3`
   - `AUTO_MIN_LEVEL`: 下限音量。既定 `0.05`
   - `AUTO_STATE_FILE`: state ファイルパス。既定 `logs/auto_standby_state.json`
+  - `AUTO_STATE_STALE_SEC`: これ以上間が空いた state は連続カウントを捨てる秒数。既定 `1800`（15分 x 2）
   - `STEP`, `MANUAL_RISE_THRESHOLD`, `CHROMECAST_NAME` は他コマンドと共通
+- state の扱い:
+  - Mac のスリープ等でスケジューラが止まると連続カウントが実態とずれるため、`AUTO_STATE_STALE_SEC` を超えて間が空いた state はカウントを捨てて数え直す（視聴再開直後に電源OFFされるのを防ぐ）
+  - 電源OFF状態だけは時間が空いても維持する（音量上昇 / active app を見るまで何もしない）
+  - state ファイルが壊れていた場合は作り直して続行する（読めない state で毎回落ち続けないため）
 
 ### periodic-worker 登録例
 

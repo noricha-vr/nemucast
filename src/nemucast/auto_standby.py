@@ -42,6 +42,8 @@ from nemucast.config import (
 AUTO_MIN_LEVEL = float(os.getenv("AUTO_MIN_LEVEL", "0.05"))
 AUTO_LOWERED_THRESHOLD = int(os.getenv("AUTO_LOWERED_THRESHOLD", "3"))
 AUTO_STATE_FILE = Path(os.getenv("AUTO_STATE_FILE", f"{LOG_DIR}/auto_standby_state.json"))
+# 実行間隔 15 分の 2 倍。これを超えて間が空いた state は連続カウントを信用しない
+AUTO_STATE_STALE_SEC = int(os.getenv("AUTO_STATE_STALE_SEC", "1800"))
 
 
 class TickResult(Enum):
@@ -61,22 +63,46 @@ def fresh_state(device_name: str) -> dict[str, Any]:
     }
 
 
+def is_state_stale(state: dict[str, Any], stale_sec: int = AUTO_STATE_STALE_SEC) -> bool:
+    """前回更新から stale_sec 以上空いたか判定する。"""
+    updated_at = state.get("updated_at")
+    if not isinstance(updated_at, int | float):
+        return True
+    return time.time() - updated_at > stale_sec
+
+
 def load_state(state_file: Path, device_name: str) -> dict[str, Any] | None:
     if not state_file.exists():
         return None
-    data = json.loads(state_file.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        # 壊れた state を放置すると毎 tick 例外で落ち続け、15 分間隔のジョブが自力復帰できない
+        logging.warning("state を読めなかったため作り直します: %s", exc)
+        return None
     if not isinstance(data, dict) or data.get("device_name") != device_name:
         return None
+    if is_state_stale(data):
+        # powered_off は「音量上昇 / active app まで何もしない」という不変条件なので跨いで維持する
+        if data.get("powered_off"):
+            return data
+        # スケジューラ停止（スリープ等）を挟むと連続カウントが実態とずれ、
+        # 視聴再開直後に quit_app してしまうため、カウントは捨てて数え直す
+        logging.info("前回更新から時間が空いたため連続カウントをリセットします。")
+        return fresh_state(device_name)
     return data
 
 
 def save_state(state_file: Path, state: dict[str, Any]) -> None:
     state_file.parent.mkdir(parents=True, exist_ok=True)
     state["updated_at"] = time.time()
-    state_file.write_text(
+    # 書き込み途中で kill されても壊れた JSON を残さないよう、一時ファイル経由で置き換える
+    tmp_file = state_file.with_name(f"{state_file.name}.tmp")
+    tmp_file.write_text(
         json.dumps(state, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    os.replace(tmp_file, state_file)
 
 
 def get_active_app_label(cast: Any) -> str | None:
