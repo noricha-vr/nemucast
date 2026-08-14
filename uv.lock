@@ -150,6 +150,7 @@ source = { editable = "." }
 dependencies = [
     { name = "pychromecast" },
     { name = "python-dotenv" },
+    { name = "zeroconf" },
 ]
 
 [package.dev-dependencies]
@@ -164,6 +165,7 @@ dev = [
 requires-dist = [
     { name = "pychromecast", specifier = ">=14.0.7" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "zeroconf", specifier = ">=0.147.0" },
 ]
 
 [package.metadata.requires-dev]

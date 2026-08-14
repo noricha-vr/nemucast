@@ -7,6 +7,8 @@ requires-python = ">=3.11"
 dependencies = [
     "pychromecast>=14.0.7",
     "python-dotenv>=1.0.0",
+    # cast_client が InterfaceChoice を直接使うため、推移的依存に任せず自分で宣言する
+    "zeroconf>=0.147.0",
 ]
 
 [dependency-groups]
