@@ -11,6 +11,7 @@ import pytest
 from nemucast.auto_standby import (
     TickResult,
     fresh_state,
+    get_active_app_label,
     load_state,
     run_tick,
     save_state,
@@ -20,6 +21,8 @@ from nemucast.auto_standby import (
 def make_cast(volume: float) -> Mock:
     cast = Mock()
     cast.status.volume_level = volume
+    cast.status.app_id = None
+    cast.status.display_name = None
     return cast
 
 
@@ -88,6 +91,20 @@ class TestRunTick:
         assert new_state["consecutive_lowered"] == 1
         cast.set_volume.assert_called_once_with(0.36)
 
+    def test_powered_off_with_active_app_resumes_session_without_volume_rise(self) -> None:
+        cast = make_cast(0.10)
+        cast.status.app_id = "AndroidNativeApp"
+        state = fresh_state("Dell")
+        state["powered_off"] = True
+        state["volume_at_power_off"] = 0.10
+
+        result, new_state = run_tick(cast=cast, state=state, step=-0.04, min_level=0.05)
+
+        assert result == TickResult.LOWERED
+        assert new_state["powered_off"] is False
+        assert new_state["consecutive_lowered"] == 1
+        cast.set_volume.assert_called_once_with(0.06)
+
     def test_min_level_does_not_set_volume_but_increments_count(self) -> None:
         cast = make_cast(0.05)
         state = fresh_state("Dell")
@@ -121,6 +138,27 @@ class TestRunTick:
         assert state["volume_at_power_off"] == 0.38
 
 
+class TestActiveAppLabel:
+    def test_returns_app_id_first(self) -> None:
+        cast = make_cast(0.10)
+        cast.status.app_id = "E8C28D3C"
+        cast.status.display_name = "YouTube"
+
+        assert get_active_app_label(cast) == "E8C28D3C"
+
+    def test_uses_display_name_when_app_id_missing(self) -> None:
+        cast = make_cast(0.10)
+        cast.status.display_name = "YouTube"
+
+        assert get_active_app_label(cast) == "YouTube"
+
+    def test_ignores_mock_placeholder_values(self) -> None:
+        cast = Mock()
+        cast.status.volume_level = 0.10
+
+        assert get_active_app_label(cast) is None
+
+
 class TestStatePersistence:
     def test_load_state_returns_none_when_missing(self, tmp_path: Path) -> None:
         assert load_state(tmp_path / "missing.json", "Dell") is None
@@ -152,7 +190,11 @@ class TestStatePersistence:
 
 
 class TestMain:
-    def test_main_exits_when_chromecast_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_main_exits_when_chromecast_missing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         from nemucast import auto_standby
 
         monkeypatch.chdir(tmp_path)

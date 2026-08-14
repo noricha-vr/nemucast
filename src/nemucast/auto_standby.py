@@ -1,8 +1,8 @@
 """15分間隔の最小ロジックで Chromecast を寝かしつけるスクリプト。
 
 ロジック:
-  1. 電源OFF状態 (powered_off=True) なら、音量が上がっていない限り何もしない。
-     音量が上がっていれば state をリセットして通常フローに入る。
+  1. 電源OFF状態 (powered_off=True) なら、音量上昇または active app を再開として扱う。
+     どちらも見えなければ何もしない。
   2. 直前 script が下げた値より現在音量が上がっていれば、連続下げカウントを 0 に戻す。
   3. 連続下げカウントが AUTO_LOWERED_THRESHOLD 以上なら quit_app を呼んで電源OFF。
   4. それ以外は音量を STEP だけ下げ、カウントを +1 する。
@@ -79,6 +79,19 @@ def save_state(state_file: Path, state: dict[str, Any]) -> None:
     )
 
 
+def get_active_app_label(cast: Any) -> str | None:
+    """Return the Chromecast app label when the device appears active."""
+    status = getattr(cast, "status", None)
+    if status is None:
+        return None
+
+    for attr in ("app_id", "display_name"):
+        value = getattr(status, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def run_tick(
     cast: Any,
     state: dict[str, Any],
@@ -95,10 +108,19 @@ def run_tick(
     # 1. 電源OFF状態の継続処理
     if state.get("powered_off"):
         baseline = state.get("volume_at_power_off")
-        if baseline is None or current <= baseline + rise_threshold:
+        active_app = get_active_app_label(cast)
+        volume_rose = baseline is not None and current > baseline + rise_threshold
+        if not volume_rose and active_app is None:
             logging.info("電源OFF状態を維持。何もしません。")
             return TickResult.SKIP, state
-        logging.info("音量上昇を検知 (%.2f → %.2f)。state をリセットして再開します。", baseline, current)
+        if volume_rose:
+            logging.info(
+                "音量上昇を検知 (%.2f → %.2f)。state をリセットして再開します。",
+                baseline,
+                current,
+            )
+        else:
+            logging.info("active app (%s) を検知。state をリセットして再開します。", active_app)
         state = fresh_state(state["device_name"])
 
     # 2. 手動上昇の検知 → カウントリセット
@@ -154,9 +176,7 @@ def setup_logging() -> None:
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "15分間隔で Chromecast の音量を下げ、3 回連続で下げ続けたら電源OFF にする"
-        )
+        description=("15分間隔で Chromecast の音量を下げ、3 回連続で下げ続けたら電源OFF にする")
     )
     parser.add_argument(
         "-n", "--name", type=str, default=CHROMECAST_NAME,

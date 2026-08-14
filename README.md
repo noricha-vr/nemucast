@@ -75,10 +75,11 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 - コマンド: `nemucast-auto`
 - 想定実行: 15 分間隔で常時稼働 (periodic-worker `--every 15m`)
 - 動き:
-  1. 直前 tick で電源OFFしていて、音量が上がっていなければ何もしない
-  2. 直前 script が下げた音量より上がっていれば「視聴中」と判定し、連続下げカウントを 0 に戻す
-  3. 連続下げカウントが `AUTO_LOWERED_THRESHOLD` (既定 3) 以上なら `quit_app` で電源OFF
-  4. それ以外は音量を `STEP` (既定 -0.04) だけ下げる。`AUTO_MIN_LEVEL` (既定 0.05) 以下なら下げないがカウントは進める
+  1. 直前 tick で電源OFFしていて、音量上昇または active app がなければ何もしない
+  2. 電源OFF後に音量上昇または active app があれば「視聴再開」と判定し、通常フローに戻す
+  3. 直前 script が下げた音量より上がっていれば「視聴中」と判定し、連続下げカウントを 0 に戻す
+  4. 連続下げカウントが `AUTO_LOWERED_THRESHOLD` (既定 3) 以上なら `quit_app` で電源OFF
+  5. それ以外は音量を `STEP` (既定 -0.04) だけ下げる。`AUTO_MIN_LEVEL` (既定 0.05) 以下なら下げないがカウントは進める
 - 環境変数:
   - `AUTO_LOWERED_THRESHOLD`: 電源OFFまでの連続下げ回数。既定 `3`
   - `AUTO_MIN_LEVEL`: 下限音量。既定 `0.05`
@@ -109,7 +110,9 @@ flowchart TD
     Connect --> CurVol[現在音量を取得]
     CurVol --> PoweredOff{state.powered_off?}
     PoweredOff -->|Yes| Risen{current &gt;<br/>volume_at_power_off +<br/>RISE_THRESHOLD?}
-    Risen -->|No| Skip[何もしない]
+    Risen -->|No| ActiveApp{active app?}
+    ActiveApp -->|No| Skip[何もしない]
+    ActiveApp -->|Yes 視聴再開| Reset1[state を初期化]
     Risen -->|Yes 視聴再開| Reset1[state を初期化]
     Reset1 --> ManualCheck
     PoweredOff -->|No| ManualCheck{current &gt;<br/>last_lowered_to +<br/>RISE_THRESHOLD?}
