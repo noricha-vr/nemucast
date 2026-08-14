@@ -10,8 +10,6 @@
 - `CHROMECAST_NAME`, `STEP`, `MIN_LEVEL`, `DEFAULT_INTERVAL_SEC`
 - `INACTIVE_THRESHOLD`, `MANUAL_RISE_THRESHOLD`, `DEFAULT_STATE_FILE`
 - `RUN_UNTIL_STANDBY`, `STATE_STALE_INTERVAL_MULTIPLIER`
-- `CRON_20_*`（`NAME`, `INTERVAL_SEC`, `INACTIVE_THRESHOLD`, `STEP`, `MIN_LEVEL`, `STATE_FILE`）
-- `CRON_0030_*`（同上）
 - `MAX_HISTORY_ENTRIES`
 
 ## `src/nemucast/state.py`
@@ -88,12 +86,54 @@ CLI エントリポイント、引数解析、ロギング設定。
 - 通常実行とプロファイル実行の共通入口
 
 #### `main()`
-- 通常の `nemucast` エントリーポイント
+- 通常の `nemucast` エントリーポイント（手動デバッグ用）
 
-#### `main_cron_20()`
-- `nemucast-cron-20` 用エントリーポイント
-- `config.CRON_20_OVERRIDES` を渡し、20:00 に即 standby させるプロファイル
+## `src/nemucast/standby.py`
 
-#### `main_cron_0030()`
-- `nemucast-cron-0030` 用エントリーポイント
-- `config.CRON_0030_OVERRIDES` を渡し、15 分ごとに判定を継続して 45 分無操作なら standby にするプロファイル
+「20:00 になったら即電源OFF」のような時刻指定 standby を行う最小スクリプト。
+`cli.py` とは独立しており、音量制御や state 管理を持たない。
+
+#### `parse_args(args=None)`
+- `--name` のみを受け付ける薄い引数パーサ
+
+#### `setup_logging()`
+- `logs/standby.log` と標準出力にローテーション付きで出力する
+
+#### `main(args=None)`
+- `nemucast-standby` 用エントリーポイント
+- 指定デバイスを `discover_chromecasts` で発見し、`standby_device` を呼んで終了する
+
+## `src/nemucast/auto_standby.py`
+
+15 分間隔の最小ロジックで Chromecast を寝かしつけるスクリプト。`cli.py` /
+`volume.py` / `state.py` には依存せず、`cast_client` ヘルパだけ再利用する。
+
+state スキーマ:
+
+```json
+{
+  "device_name": "Dell",
+  "last_lowered_to": 0.32,
+  "consecutive_lowered": 2,
+  "powered_off": false,
+  "volume_at_power_off": null,
+  "updated_at": 1730000000.0
+}
+```
+
+#### `fresh_state(device_name)`
+- 初期 state を生成する
+
+#### `load_state(state_file, device_name)`
+- state JSON を読む。デバイス名が一致しなければ `None` を返す
+
+#### `save_state(state_file, state)`
+- `updated_at` を現在時刻に更新して保存する
+
+#### `run_tick(cast, state, *, step, min_level, lowered_threshold, rise_threshold)`
+- 1 tick 分の判定と音量操作を行い、`(TickResult, 更新後 state)` を返す
+- 純粋関数に近く、テストでは `cast` をモックするだけで全分岐を検証できる
+
+#### `main(args=None)`
+- `nemucast-auto` 用エントリーポイント
+- discover → load_state → run_tick → save_state を 1 サイクル実行する

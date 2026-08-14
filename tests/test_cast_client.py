@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
 from unittest.mock import Mock, patch
+
+import zeroconf
 
 from nemucast.cast_client import (
     discover_chromecasts,
@@ -11,30 +15,36 @@ from nemucast.cast_client import (
 )
 
 
-def test_discover_chromecasts_found() -> None:
+def test_discover_chromecasts_found(fake_network: Callable[[list[str]], Any]) -> None:
     """Chromecast検索のテスト（デバイスが見つかった場合）"""
-    mock_cast = Mock()
-    mock_cast.cast_info.friendly_name = "TestDevice"
-    mock_browser = Mock()
-
-    with patch("pychromecast.get_chromecasts", return_value=([mock_cast], mock_browser)):
+    with fake_network(["OtherDevice", "TestDevice"]) as network:
         cast, browser = discover_chromecasts("TestDevice")
 
-    assert cast == mock_cast
-    assert browser == mock_browser
+    assert cast == network["casts"]["TestDevice"]
+    assert browser == network["browser"]
 
 
-def test_discover_chromecasts_not_found() -> None:
+def test_discover_chromecasts_not_found(fake_network: Callable[[list[str]], Any]) -> None:
     """Chromecast検索のテスト（デバイスが見つからない場合）"""
-    mock_cast = Mock()
-    mock_cast.cast_info.friendly_name = "OtherDevice"
-    mock_browser = Mock()
-
-    with patch("pychromecast.get_chromecasts", return_value=([mock_cast], mock_browser)):
+    with fake_network(["OtherDevice"]) as network:
         cast, browser = discover_chromecasts("TestDevice")
 
     assert cast is None
-    assert browser == mock_browser
+    assert browser == network["browser"]
+
+
+def test_discover_chromecasts_skips_loopback_interface(
+    fake_network: Callable[[list[str]], Any],
+) -> None:
+    """loopback を bind しない zeroconf で探索する（mDNS 5353 衝突の再発防止）"""
+    with fake_network(["TestDevice"]) as network:
+        discover_chromecasts("TestDevice")
+
+    network["zeroconf"].assert_called_once_with(interfaces=zeroconf.InterfaceChoice.Default)
+    assert (
+        network["get_listed"].call_args.kwargs["zeroconf_instance"]
+        == network["zeroconf"].return_value
+    )
 
 
 def test_stop_discovery_prefers_browser_method() -> None:
