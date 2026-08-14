@@ -6,8 +6,20 @@ import logging
 import time
 
 import pychromecast
+import zeroconf
 
 from nemucast.config import STANDBY_WAIT_SEC
+
+
+def create_zeroconf() -> zeroconf.Zeroconf:
+    """loopback を bind しない zeroconf インスタンスを生成する。
+
+    zeroconf の既定 (InterfaceChoice.All) は 127.0.0.1 にも mDNS の respond socket を
+    bind するため、loopback:5353 を SO_REUSEPORT なしで占有するプロセス
+    （Lima VM のポートフォワード等）があると OSError(48) で discovery ごと失敗する。
+    LAN 上の Chromecast 探索に loopback は不要なので 0.0.0.0 だけを bind する。
+    """
+    return zeroconf.Zeroconf(interfaces=zeroconf.InterfaceChoice.Default)
 
 
 def discover_chromecasts(
@@ -18,7 +30,17 @@ def discover_chromecasts(
 ]:
     """指定された名前の Chromecast を検索する"""
     logging.info("Chromecast デバイスを検索しています...")
-    chromecasts, browser = pychromecast.get_chromecasts()
+    # pychromecast.get_chromecasts() は blocking パスで zeroconf_instance を捨てるため
+    # （pychromecast 14.0.7）、discovery API を直接呼んで自前の zeroconf を渡す。
+    devices, browser = pychromecast.discovery.discover_chromecasts(
+        zeroconf_instance=create_zeroconf()
+    )
+    chromecasts = []
+    for device in devices:
+        try:
+            chromecasts.append(pychromecast.get_chromecast_from_cast_info(device, browser.zc))
+        except pychromecast.ChromecastConnectionError:
+            logging.warning("接続できないデバイスをスキップします: %s", device.friendly_name)
 
     if not chromecasts:
         logging.error("ネットワーク上で Chromecast が見つかりませんでした。")

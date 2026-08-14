@@ -10,11 +10,11 @@ from nemucast.cli import main
 class TestMainFlow:
     """main のテストクラス"""
 
-    @patch("pychromecast.get_chromecasts")
-    def test_main_exits_when_chromecast_missing(self, mock_get_chromecasts):
+    @patch("nemucast.cli.discover_chromecasts")
+    def test_main_exits_when_chromecast_missing(self, mock_discover):
         """Chromecastが見つからない場合は終了コード1"""
         mock_browser = Mock()
-        mock_get_chromecasts.return_value = ([], mock_browser)
+        mock_discover.return_value = (None, mock_browser)
 
         with pytest.raises(SystemExit) as exc_info:
             with patch("sys.argv", ["nemucast"]):
@@ -24,10 +24,10 @@ class TestMainFlow:
         mock_browser.stop_discovery.assert_called_once()
 
     @patch("nemucast.cli.run_volume_session", side_effect=RuntimeError("boom"))
-    @patch("pychromecast.get_chromecasts")
+    @patch("nemucast.cli.discover_chromecasts")
     def test_main_clears_state_when_tick_fails(
         self,
-        mock_get_chromecasts,
+        mock_discover,
         mock_run_volume_session,
         tmp_path,
     ):
@@ -39,7 +39,7 @@ class TestMainFlow:
         mock_cast.cast_info.friendly_name = "Living Room"
         mock_cast.cast_info.host = "192.168.1.2"
         mock_browser = Mock()
-        mock_get_chromecasts.return_value = ([mock_cast], mock_browser)
+        mock_discover.return_value = (mock_cast, mock_browser)
 
         with pytest.raises(SystemExit) as exc_info:
             with patch(
@@ -52,4 +52,3 @@ class TestMainFlow:
         assert not state_file.exists()
         mock_cast.wait.assert_called_once()
         mock_run_volume_session.assert_called_once()
-
