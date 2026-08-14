@@ -2,14 +2,53 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
 from nemucast.state import save_state
 from nemucast.volume import VolumeSessionConfig
+
+
+@pytest.fixture
+def fake_network() -> Callable[[list[str]], Any]:
+    """指定した名前の Chromecast が LAN 上にある状態を再現するファクトリ fixture。
+
+    差し替えるのは pychromecast / zeroconf（プロセス外境界）のみで、
+    nemucast 内部の関数は patch しない。with 文が返す dict の
+    casts / browser / zeroconf で呼び出し内容を検証できる。
+    """
+
+    @contextmanager
+    def _fake_network(device_names: list[str]) -> Generator[dict[str, Any]]:
+        browser = Mock()
+        browser.devices = {}
+        casts: dict[str, Mock] = {}
+        for index, name in enumerate(device_names):
+            cast = Mock()
+            cast.cast_info.friendly_name = name
+            casts[name] = cast
+            browser.devices[index] = cast.cast_info
+
+        def get_listed(friendly_names: list[str], **_kwargs: Any) -> tuple[list[Mock], Mock]:
+            return [casts[name] for name in friendly_names if name in casts], browser
+
+        with (
+            patch("pychromecast.get_listed_chromecasts", side_effect=get_listed) as get_listed_mock,
+            patch("zeroconf.Zeroconf") as zeroconf_mock,
+        ):
+            yield {
+                "browser": browser,
+                "casts": casts,
+                "get_listed": get_listed_mock,
+                "zeroconf": zeroconf_mock,
+            }
+
+    return _fake_network
 
 
 @pytest.fixture

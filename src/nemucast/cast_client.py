@@ -28,33 +28,31 @@ def discover_chromecasts(
     pychromecast.Chromecast | None,
     pychromecast.discovery.CastBrowser | None,
 ]:
-    """指定された名前の Chromecast を検索する"""
+    """指定された名前の Chromecast を検索する。
+
+    Returns:
+        (見つかった Chromecast または None, 停止用の CastBrowser)。
+        browser は呼び出し側が stop_discovery() で必ず閉じる。
+    """
     logging.info("Chromecast デバイスを検索しています...")
-    # pychromecast.get_chromecasts() は blocking パスで zeroconf_instance を捨てるため
-    # （pychromecast 14.0.7）、discovery API を直接呼んで自前の zeroconf を渡す。
-    devices, browser = pychromecast.discovery.discover_chromecasts(
-        zeroconf_instance=create_zeroconf()
+    # get_chromecasts() は blocking パスで zeroconf_instance を捨てる（pychromecast 14.0.7）ため
+    # 使わない。get_listed_chromecasts なら自前の zeroconf が効き、目的デバイスを見つけた時点で
+    # 探索を打ち切るので、無関係なデバイスへの接続も待ち時間も発生しない。
+    chromecasts, browser = pychromecast.get_listed_chromecasts(
+        friendly_names=[target_name],
+        zeroconf_instance=create_zeroconf(),
     )
-    chromecasts = []
-    for device in devices:
-        try:
-            chromecasts.append(pychromecast.get_chromecast_from_cast_info(device, browser.zc))
-        except pychromecast.ChromecastConnectionError:
-            logging.warning("接続できないデバイスをスキップします: %s", device.friendly_name)
 
     if not chromecasts:
-        logging.error("ネットワーク上で Chromecast が見つかりませんでした。")
+        logging.error(
+            "目的の Chromecast '%s' が見つかりませんでした。発見したデバイス: %s",
+            target_name,
+            [device.friendly_name for device in browser.devices.values()],
+        )
         return None, browser
 
-    logging.info("発見したデバイス: %s", [cc.cast_info.friendly_name for cc in chromecasts])
-
-    for cc in chromecasts:
-        logging.info("キャスト名: %s", cc.cast_info.friendly_name)
-        if cc.cast_info.friendly_name == target_name:
-            return cc, browser
-
-    logging.error("目的の Chromecast '%s' が見つかりませんでした。", target_name)
-    return None, browser
+    logging.info("キャスト名: %s", chromecasts[0].cast_info.friendly_name)
+    return chromecasts[0], browser
 
 
 def stop_discovery(

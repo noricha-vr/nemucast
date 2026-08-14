@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -16,59 +15,36 @@ from nemucast.cast_client import (
 )
 
 
-@contextmanager
-def patched_discovery(friendly_names: list[str]) -> Generator[dict[str, Any]]:
-    """指定した名前のデバイスが見つかる discovery をモックする。
-
-    yield する dict の browser / zeroconf / casts で呼び出し内容を検証できる。
-    """
-    browser = Mock()
-    casts = []
-    for name in friendly_names:
-        cast = Mock()
-        cast.cast_info.friendly_name = name
-        casts.append(cast)
-
-    with (
-        patch("pychromecast.discovery.discover_chromecasts") as mock_discover,
-        patch("pychromecast.get_chromecast_from_cast_info", side_effect=casts) as mock_from_info,
-        patch("nemucast.cast_client.zeroconf.Zeroconf") as mock_zeroconf,
-    ):
-        mock_discover.return_value = ([cast.cast_info for cast in casts], browser)
-        yield {
-            "browser": browser,
-            "casts": casts,
-            "discover": mock_discover,
-            "from_info": mock_from_info,
-            "zeroconf": mock_zeroconf,
-        }
-
-
-def test_discover_chromecasts_found() -> None:
+def test_discover_chromecasts_found(fake_network: Callable[[list[str]], Any]) -> None:
     """Chromecast検索のテスト（デバイスが見つかった場合）"""
-    with patched_discovery(["OtherDevice", "TestDevice"]) as mocks:
+    with fake_network(["OtherDevice", "TestDevice"]) as network:
         cast, browser = discover_chromecasts("TestDevice")
 
-    assert cast == mocks["casts"][1]
-    assert browser == mocks["browser"]
+    assert cast == network["casts"]["TestDevice"]
+    assert browser == network["browser"]
 
 
-def test_discover_chromecasts_not_found() -> None:
+def test_discover_chromecasts_not_found(fake_network: Callable[[list[str]], Any]) -> None:
     """Chromecast検索のテスト（デバイスが見つからない場合）"""
-    with patched_discovery(["OtherDevice"]) as mocks:
+    with fake_network(["OtherDevice"]) as network:
         cast, browser = discover_chromecasts("TestDevice")
 
     assert cast is None
-    assert browser == mocks["browser"]
+    assert browser == network["browser"]
 
 
-def test_discover_chromecasts_skips_loopback_interface() -> None:
-    """loopback を bind しない zeroconf で discovery する（mDNS 5353 衝突の再発防止）"""
-    with patched_discovery(["TestDevice"]) as mocks:
+def test_discover_chromecasts_skips_loopback_interface(
+    fake_network: Callable[[list[str]], Any],
+) -> None:
+    """loopback を bind しない zeroconf で探索する（mDNS 5353 衝突の再発防止）"""
+    with fake_network(["TestDevice"]) as network:
         discover_chromecasts("TestDevice")
 
-    mocks["zeroconf"].assert_called_once_with(interfaces=zeroconf.InterfaceChoice.Default)
-    assert mocks["discover"].call_args.kwargs["zeroconf_instance"] == mocks["zeroconf"].return_value
+    network["zeroconf"].assert_called_once_with(interfaces=zeroconf.InterfaceChoice.Default)
+    assert (
+        network["get_listed"].call_args.kwargs["zeroconf_instance"]
+        == network["zeroconf"].return_value
+    )
 
 
 def test_stop_discovery_prefers_browser_method() -> None:
