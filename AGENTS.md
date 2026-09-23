@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 AI エージェント（Claude Code / Codex 等）がこのリポジトリを操作する際の前提情報。
 プロダクトの使い方や環境変数の意味は `README.md` / `.env.example` を参照すること。
