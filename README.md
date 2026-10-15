@@ -85,8 +85,13 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
   - `AUTO_MIN_LEVEL`: 下限音量。既定 `0.05`
   - `AUTO_STATE_FILE`: state ファイルパス。既定 `logs/auto_standby_state.json`
   - `AUTO_STATE_STALE_SEC`: これ以上間が空いた state は連続カウントを捨てる秒数。既定 `1800`（15分 x 2）
+  - `DISCOVERY_ALERT_COMMAND`: LAN 上の Chromecast が 1 台も見えない状態に入った時・抜けた時に 1 回ずつ実行する通知コマンド。本文を末尾の引数で渡す。既定は空（通知しない）
+  - `DISCOVERY_ALERT_FILE`: 通知済みかを覚えるフラグファイル。既定 `logs/discovery_alert_state.json`
+  - `DISCOVERY_ALERT_AFTER_TICKS`: LAN 上 0 台が何回続いたら障害とみなすか。既定 `2`（スリープ復帰直後の一瞬の 0 台で誤報しないため）。`0` で判定しない（LAN に対象の Chromecast 1 台だけの家庭向け）
   - `STEP`, `MANUAL_RISE_THRESHOLD`, `CHROMECAST_NAME` は他コマンドと共通
 - 終了コード: デバイスが見つからない場合は「寝かしつける対象がない」とみなして正常終了する（見つからない状態の方が長いため、失敗扱いにするとスケジューラの通知が埋もれる）
+- ただし LAN 上の Chromecast が 1 台も見えない時は環境側の障害（macOS のローカルネットワーク権限が外れた・ネットワーク断）とみなし、ERROR を出して終了コード 2 で終わる（`DISCOVERY_ALERT_AFTER_TICKS` 回続いた時）。目的デバイスが寝ていても他の Chromecast は常時 mDNS に出るため、0 台は通常起きない
+  - periodic-worker など launchd 配下から動かす場合、そのプロセスに「システム設定 > プライバシーとセキュリティ > ローカルネットワーク」の許可が要る。外れると LAN 宛の送信がすべて `No route to host` になる
 - 注意: 活動シグナルは音量変化と active app だけなので、音量に触れずに視聴し続けると時間帯を問わず約 45 分（15 分 x 3）で `quit_app` される
 - state の扱い:
   - Mac のスリープ等でスケジューラが止まると連続カウントが実態とずれるため、`AUTO_STATE_STALE_SEC` を超えて間が空いた state はカウントを捨てて数え直す（視聴再開直後に電源OFFされるのを防ぐ）

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -275,3 +276,107 @@ class TestMain:
         assert saved["device_name"] == "Dell"
         assert saved["consecutive_lowered"] == 1
         assert saved["last_lowered_to"] == pytest.approx(0.46)
+
+
+class TestDiscoveryAlert:
+    @pytest.fixture
+    def notify(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Mock:
+        from nemucast import auto_standby
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(auto_standby, "DISCOVERY_ALERT_COMMAND", "notify --message")
+        monkeypatch.setattr(auto_standby, "DISCOVERY_ALERT_AFTER_TICKS", 2)
+        run = Mock()
+        monkeypatch.setattr(auto_standby.subprocess, "run", run)
+        return run
+
+    def test_zero_devices_confirmed_after_threshold_and_alerts_once(
+        self, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        """LAN 上 0 台が続いたら非ゼロ終了。1 回目は様子見、通知は確定した時の 1 回だけ"""
+        from nemucast import auto_standby
+
+        with fake_network([]) as network:
+            auto_standby.main(args=["--name", "Dell"])
+        network["browser"].stop_discovery.assert_called_once()
+        notify.assert_not_called()
+
+        for _ in range(2):
+            with fake_network([]), pytest.raises(SystemExit) as exc:
+                auto_standby.main(args=["--name", "Dell"])
+            assert exc.value.code == auto_standby.EXIT_NO_DEVICE_ON_LAN
+
+        notify.assert_called_once()
+        assert notify.call_args.args[0][:2] == ["notify", "--message"]
+        assert "1 台も見えません" in notify.call_args.args[0][-1]
+
+    def test_failed_alert_is_retried_next_tick(
+        self, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        """通知が届かなかったら次の tick で送り直す（障害を黙って見逃さない）"""
+        from nemucast import auto_standby
+
+        notify.side_effect = [subprocess.CalledProcessError(1, "notify", stderr="boom"), None]
+        with fake_network([]):
+            auto_standby.main(args=["--name", "Dell"])
+        for _ in range(3):
+            with fake_network([]), pytest.raises(SystemExit):
+                auto_standby.main(args=["--name", "Dell"])
+
+        assert notify.call_count == 2
+
+    def test_recovery_alerts_once_and_clears_flag(
+        self, tmp_path: Path, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        """再び見えたら回復を 1 回だけ通知し、以後は鳴らさない"""
+        from nemucast import auto_standby
+
+        with fake_network([]):
+            auto_standby.main(args=["--name", "Dell"])
+        with fake_network([]), pytest.raises(SystemExit):
+            auto_standby.main(args=["--name", "Dell"])
+        for _ in range(2):
+            with fake_network(["キッチン"]):
+                auto_standby.main(args=["--name", "Dell"])
+
+        assert notify.call_count == 2
+        assert "再び見える" in notify.call_args.args[0][-1]
+        assert not (tmp_path / "logs" / "discovery_alert_state.json").exists()
+
+    def test_single_transient_zero_does_not_alert(
+        self, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        """一瞬だけ 0 台（スリープ復帰直後等）は障害にも回復にも数えない"""
+        from nemucast import auto_standby
+
+        with fake_network([]):
+            auto_standby.main(args=["--name", "Dell"])
+        with fake_network(["キッチン"]):
+            auto_standby.main(args=["--name", "Dell"])
+        with fake_network([]):
+            auto_standby.main(args=["--name", "Dell"])
+
+        notify.assert_not_called()
+
+    def test_disabled_when_after_ticks_is_zero(
+        self,
+        notify: Mock,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_network: Callable[[list[str]], Any],
+    ) -> None:
+        """LAN に対象 1 台だけの家庭向けに判定を切れる"""
+        from nemucast import auto_standby
+
+        monkeypatch.setattr(auto_standby, "DISCOVERY_ALERT_AFTER_TICKS", 0)
+        for _ in range(3):
+            with fake_network([]):
+                auto_standby.main(args=["--name", "Dell"])
+
+        notify.assert_not_called()
+
+    @pytest.mark.parametrize("command", ["no-such-command-xyz", 'notify "unclosed'])
+    def test_broken_alert_command_does_not_raise(self, command: str) -> None:
+        """通知コマンドが無い・書式ミスでも寝かしつけ本体は止めない"""
+        from nemucast import auto_standby
+
+        assert auto_standby.send_discovery_alert("msg", command=command) is False

@@ -70,7 +70,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 
 | コマンド | 用途 | 主な設定 |
 |----------|------|----------|
-| `nemucast-auto` | 常用。periodic-worker から 15 分間隔・24 時間で実行し、音量を下げながら自動で電源OFFにする | `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800` |
+| `nemucast-auto` | 常用。periodic-worker から 15 分間隔・24 時間で実行し、音量を下げながら自動で電源OFFにする | `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800`, `DISCOVERY_ALERT_COMMAND`（LAN 上 0 台が `DISCOVERY_ALERT_AFTER_TICKS=2` 回続いたら終了コード 2 と通知、回復時も 1 回通知） |
 | `nemucast-standby` | 20:00 用。発見して `quit_app` するだけ。音量制御も state も持たない | `CHROMECAST_NAME` のみ |
 | `nemucast` | 手動デバッグ用。1回の tick 実行または `--run-until-standby` で継続実行 | `INTERVAL_SEC=1200`, `INACTIVE_THRESHOLD=3`, `STATE_FILE=logs/activity_state.json` |
 

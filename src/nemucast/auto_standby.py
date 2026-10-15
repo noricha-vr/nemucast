@@ -18,6 +18,8 @@ import json
 import logging
 import logging.handlers
 import os
+import shlex
+import subprocess
 import sys
 import time
 from enum import Enum
@@ -45,6 +47,18 @@ AUTO_LOWERED_THRESHOLD = int(os.getenv("AUTO_LOWERED_THRESHOLD", "3"))
 AUTO_STATE_FILE = Path(os.getenv("AUTO_STATE_FILE", f"{LOG_DIR}/auto_standby_state.json"))
 # 実行間隔 15 分の 2 倍。これを超えて間が空いた state は連続カウントを信用しない
 AUTO_STATE_STALE_SEC = int(os.getenv("AUTO_STATE_STALE_SEC", "1800"))
+# LAN 上に Chromecast が 1 台も見えない状態に入った時・抜けた時に 1 回ずつ実行する通知コマンド。
+# 本文を末尾の引数として渡す。空なら通知しない
+DISCOVERY_ALERT_COMMAND = os.getenv("DISCOVERY_ALERT_COMMAND", "")
+DISCOVERY_ALERT_FILE = Path(
+    os.getenv("DISCOVERY_ALERT_FILE", f"{LOG_DIR}/discovery_alert_state.json")
+)
+DISCOVERY_ALERT_TIMEOUT_SEC = 60
+# LAN 上 0 台が何 tick 続いたら障害とみなすか（スリープ復帰直後の一瞬の 0 台で誤報しないため）。
+# 0 なら判定しない（対象の Chromecast が LAN に 1 台しかない家庭向け）
+DISCOVERY_ALERT_AFTER_TICKS = int(os.getenv("DISCOVERY_ALERT_AFTER_TICKS", "2"))
+# LAN 上のデバイスが 0 台の時の終了コード。デバイス不在（成功扱い）と区別するため非ゼロにする
+EXIT_NO_DEVICE_ON_LAN = 2
 
 
 class TickResult(Enum):
@@ -212,11 +226,93 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(args)
 
 
+def send_discovery_alert(message: str, command: str | None = None) -> bool:
+    """通知コマンドに本文を渡して実行し、届いたかを返す。失敗しても寝かしつけ本体は止めない。"""
+    command = DISCOVERY_ALERT_COMMAND if command is None else command
+    if not command:
+        return True
+    try:
+        subprocess.run(
+            [*shlex.split(command), message],
+            check=True,
+            timeout=DISCOVERY_ALERT_TIMEOUT_SEC,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        logging.warning("通知コマンドが失敗しました: %s stderr=%s", exc, exc.stderr)
+        return False
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # ValueError は DISCOVERY_ALERT_COMMAND の引用符が閉じていない等の書式ミス
+        logging.warning("通知コマンドを実行できませんでした: %s", exc)
+        return False
+    return True
+
+
+def update_discovery_alert(
+    lan_has_devices: bool,
+    alert_file: Path | None = None,
+    after_ticks: int | None = None,
+) -> bool:
+    """LAN 上 0 台の連続回数を数え、障害と確定したかを返す。
+
+    通知は障害に入った時と回復した時の 1 回ずつ。通知が届かなかった時は
+    フラグを進めず、次の tick で送り直す。
+    """
+    alert_file = DISCOVERY_ALERT_FILE if alert_file is None else alert_file
+    after_ticks = DISCOVERY_ALERT_AFTER_TICKS if after_ticks is None else after_ticks
+    if after_ticks <= 0:
+        return False
+    try:
+        alert = json.loads(alert_file.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        alert = {"zero_ticks": 0, "alerted": False}
+
+    if lan_has_devices:
+        if not alert_file.exists():
+            return False
+        if alert.get("alerted"):
+            logging.info("LAN 上の Chromecast が再び見えるようになりました。")
+            if not send_discovery_alert(
+                "nemucast: LAN 上の Chromecast が再び見えるようになりました。"
+            ):
+                return False
+        alert_file.unlink(missing_ok=True)
+        return False
+
+    alert["zero_ticks"] = int(alert.get("zero_ticks", 0)) + 1
+    confirmed = alert["zero_ticks"] >= after_ticks
+    if confirmed and not alert.get("alerted"):
+        alert["alerted"] = send_discovery_alert(
+            "nemucast: LAN 上の Chromecast が 1 台も見えません。寝かしつけが止まっています。"
+            "periodic-worker のローカルネットワーク権限（システム設定 > プライバシーとセキュリティ"
+            " > ローカルネットワーク）か、ネットワークを確認してください。"
+        )
+    save_state(alert_file, alert)
+    return confirmed
+
+
 def main(args: list[str] | None = None) -> None:
     parsed = parse_args(args)
     setup_logging()
 
     cast, browser = discover_chromecasts(parsed.name)
+    lan_has_devices = browser is not None and len(browser.devices) > 0
+    if not lan_has_devices:
+        stop_discovery(browser)
+        # 目的デバイスが寝ていても他の Chromecast は常時 mDNS に出るので、
+        # 0 台が続くのは環境側の障害。
+        # macOS のローカルネットワーク権限が外れると LAN 宛 sendto が EHOSTUNREACH になり、
+        # 例外にならず 0 台として返ってくるため、ここで失敗として表に出す
+        if update_discovery_alert(lan_has_devices=False):
+            logging.error(
+                "LAN 上の Chromecast が 1 台も見えません。ローカルネットワーク権限か"
+                "ネットワークを確認してください。"
+            )
+            sys.exit(EXIT_NO_DEVICE_ON_LAN)
+        logging.warning("LAN 上の Chromecast が 1 台も見えません（一時的な可能性あり）。")
+        return
+    update_discovery_alert(lan_has_devices=True)
     if cast is None:
         # 24時間 15分間隔で回すため、デバイスが mDNS に出ない時間帯の方が長い。
         # 「寝かしつける対象がない = やることがない」は成功扱いにしないと、
