@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- `nemucast-auto`: スリープ等で `AUTO_STATE_STALE_SEC` より間が空いた前回の 0 台は、連続回数に数えないようにした（復帰直後の誤通知を防ぐ）
 - `nemucast-auto`: LAN 上の Chromecast が 1 台も見えない時（macOS のローカルネットワーク権限が外れた等）を、デバイス不在と区別して ERROR・終了コード 2 にした（`DISCOVERY_ALERT_AFTER_TICKS` 回続いた時。0 で無効）。`DISCOVERY_ALERT_COMMAND` を設定すると、この状態に入った時と回復した時に 1 回ずつ通知する
 
 ### Refactored
