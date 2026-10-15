@@ -35,6 +35,9 @@ from nemucast.cast_client import (
 from nemucast.config import (
     CHROMECAST_NAME,
     CONNECT_TIMEOUT_SEC,
+    DISCOVERY_ALERT_AFTER_TICKS,
+    DISCOVERY_ALERT_COMMAND,
+    DISCOVERY_ALERT_FILE,
     LOG_DIR,
     LOG_ROTATION_BACKUP_COUNT,
     LOG_ROTATION_MAX_BYTES,
@@ -47,16 +50,7 @@ AUTO_LOWERED_THRESHOLD = int(os.getenv("AUTO_LOWERED_THRESHOLD", "3"))
 AUTO_STATE_FILE = Path(os.getenv("AUTO_STATE_FILE", f"{LOG_DIR}/auto_standby_state.json"))
 # 実行間隔 15 分の 2 倍。これを超えて間が空いた state は連続カウントを信用しない
 AUTO_STATE_STALE_SEC = int(os.getenv("AUTO_STATE_STALE_SEC", "1800"))
-# LAN 上に Chromecast が 1 台も見えない状態に入った時・抜けた時に 1 回ずつ実行する通知コマンド。
-# 本文を末尾の引数として渡す。空なら通知しない
-DISCOVERY_ALERT_COMMAND = os.getenv("DISCOVERY_ALERT_COMMAND", "")
-DISCOVERY_ALERT_FILE = Path(
-    os.getenv("DISCOVERY_ALERT_FILE", f"{LOG_DIR}/discovery_alert_state.json")
-)
 DISCOVERY_ALERT_TIMEOUT_SEC = 60
-# LAN 上 0 台が何 tick 続いたら障害とみなすか（スリープ復帰直後の一瞬の 0 台で誤報しないため）。
-# 0 なら判定しない（対象の Chromecast が LAN に 1 台しかない家庭向け）
-DISCOVERY_ALERT_AFTER_TICKS = int(os.getenv("DISCOVERY_ALERT_AFTER_TICKS", "2"))
 # LAN 上のデバイスが 0 台の時の終了コード。デバイス不在（成功扱い）と区別するため非ゼロにする
 EXIT_NO_DEVICE_ON_LAN = 2
 

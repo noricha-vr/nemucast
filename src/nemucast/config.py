@@ -7,6 +7,7 @@ CLI / state 管理 / Chromecast 接続の各モジュールはここを参照す
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -30,6 +31,16 @@ STANDBY_WAIT_SEC = int(os.getenv("STANDBY_WAIT_SEC", "2"))
 
 # 接続確立（cast.wait）を待つ秒数。省略すると無限待ちになるため必ず指定する
 CONNECT_TIMEOUT_SEC = int(os.getenv("CONNECT_TIMEOUT_SEC", "30"))
+
+# LAN 上に Chromecast が 1 台も見えない状態に入った時・抜けた時に 1 回ずつ実行する通知コマンド。
+# 本文を末尾の引数として渡す。空なら通知しない
+DISCOVERY_ALERT_COMMAND = os.getenv("DISCOVERY_ALERT_COMMAND", "")
+DISCOVERY_ALERT_FILE = Path(
+    os.getenv("DISCOVERY_ALERT_FILE", f"{LOG_DIR}/discovery_alert_state.json")
+)
+# LAN 上 0 台が何 tick 続いたら障害とみなすか（スリープ復帰直後の一瞬の 0 台で誤報しないため）。
+# 0 なら判定しない（対象の Chromecast が LAN に 1 台しかない家庭向け）
+DISCOVERY_ALERT_AFTER_TICKS = int(os.getenv("DISCOVERY_ALERT_AFTER_TICKS", "2"))
 
 # ログファイルのローテーション設定
 LOG_ROTATION_MAX_BYTES = int(os.getenv("LOG_ROTATION_MAX_BYTES", str(512 * 1024)))
