@@ -374,6 +374,30 @@ class TestDiscoveryAlert:
 
         notify.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "content", ["[]", "null", '{"zero_ticks": "x", "alerted": false}', "{"]
+    )
+    def test_corrupted_alert_file_is_rebuilt(
+        self,
+        tmp_path: Path,
+        notify: Mock,
+        content: str,
+        fake_network: Callable[[list[str]], Any],
+    ) -> None:
+        """壊れたフラグファイルで毎 tick 落ち続けない"""
+        from nemucast import auto_standby
+
+        flag = tmp_path / "logs" / "discovery_alert_state.json"
+        flag.parent.mkdir(parents=True)
+        flag.write_text(content, encoding="utf-8")
+        with fake_network([]):
+            auto_standby.main(args=["--name", "Dell"])
+        with fake_network(["Dell"]) as network:
+            network["casts"]["Dell"].status.volume_level = 0.5
+            auto_standby.main(args=["--name", "Dell"])
+
+        assert not flag.exists()
+
     @pytest.mark.parametrize("command", ["no-such-command-xyz", 'notify "unclosed'])
     def test_broken_alert_command_does_not_raise(self, command: str) -> None:
         """通知コマンドが無い・書式ミスでも寝かしつけ本体は止めない"""

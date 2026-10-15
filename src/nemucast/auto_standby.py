@@ -249,6 +249,22 @@ def send_discovery_alert(message: str, command: str | None = None) -> bool:
     return True
 
 
+def load_discovery_alert(alert_file: Path) -> dict[str, Any]:
+    """通知フラグを読む。無い・壊れている時は初期値に戻す（毎 tick 落ち続けないため）。"""
+    default: dict[str, Any] = {"zero_ticks": 0, "alerted": False}
+    try:
+        data = json.loads(alert_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("zero_ticks"), int)
+        or not isinstance(data.get("alerted"), bool)
+    ):
+        return default
+    return data
+
+
 def update_discovery_alert(
     lan_has_devices: bool,
     alert_file: Path | None = None,
@@ -263,15 +279,12 @@ def update_discovery_alert(
     after_ticks = DISCOVERY_ALERT_AFTER_TICKS if after_ticks is None else after_ticks
     if after_ticks <= 0:
         return False
-    try:
-        alert = json.loads(alert_file.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        alert = {"zero_ticks": 0, "alerted": False}
+    alert = load_discovery_alert(alert_file)
 
     if lan_has_devices:
         if not alert_file.exists():
             return False
-        if alert.get("alerted"):
+        if alert["alerted"]:
             logging.info("LAN 上の Chromecast が再び見えるようになりました。")
             if not send_discovery_alert(
                 "nemucast: LAN 上の Chromecast が再び見えるようになりました。"
@@ -280,9 +293,9 @@ def update_discovery_alert(
         alert_file.unlink(missing_ok=True)
         return False
 
-    alert["zero_ticks"] = int(alert.get("zero_ticks", 0)) + 1
+    alert["zero_ticks"] += 1
     confirmed = alert["zero_ticks"] >= after_ticks
-    if confirmed and not alert.get("alerted"):
+    if confirmed and not alert["alerted"]:
         alert["alerted"] = send_discovery_alert(
             "nemucast: LAN 上の Chromecast が 1 台も見えません。寝かしつけが止まっています。"
             "periodic-worker のローカルネットワーク権限（システム設定 > プライバシーとセキュリティ"
