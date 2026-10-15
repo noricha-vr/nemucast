@@ -383,13 +383,14 @@ class TestDiscoveryAlert:
             "{",
             '{"zero_ticks": true, "alerted": false}',
             '{"zero_ticks": -5, "alerted": false}',
+            b"\xff\xfe",
         ],
     )
     def test_corrupted_alert_file_is_rebuilt(
         self,
         tmp_path: Path,
         notify: Mock,
-        content: str,
+        content: str | bytes,
         fake_network: Callable[[list[str]], Any],
     ) -> None:
         """壊れたフラグファイルで毎 tick 落ち続けない"""
@@ -397,7 +398,10 @@ class TestDiscoveryAlert:
 
         flag = tmp_path / "logs" / "discovery_alert_state.json"
         flag.parent.mkdir(parents=True)
-        flag.write_text(content, encoding="utf-8")
+        if isinstance(content, bytes):
+            flag.write_bytes(content)
+        else:
+            flag.write_text(content, encoding="utf-8")
         with fake_network([]):
             auto_standby.main(args=["--name", "Dell"])
         with fake_network(["Dell"]) as network:

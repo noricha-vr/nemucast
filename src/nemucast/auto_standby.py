@@ -248,7 +248,7 @@ def load_discovery_alert(alert_file: Path) -> dict[str, Any]:
     default: dict[str, Any] = {"zero_ticks": 0, "alerted": False}
     try:
         data = json.loads(alert_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):  # JSONDecodeError・UnicodeDecodeError を含む
         return default
     if (
         not isinstance(data, dict)
