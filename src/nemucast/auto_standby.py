@@ -252,7 +252,9 @@ def load_discovery_alert(alert_file: Path) -> dict[str, Any]:
         return default
     if (
         not isinstance(data, dict)
-        or not isinstance(data.get("zero_ticks"), int)
+        # bool は int のサブクラスなので type で比べる。負数は本物の障害を長く隠すため弾く
+        or type(data.get("zero_ticks")) is not int
+        or data["zero_ticks"] < 0
         or not isinstance(data.get("alerted"), bool)
     ):
         return default

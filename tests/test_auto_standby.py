@@ -375,7 +375,15 @@ class TestDiscoveryAlert:
         notify.assert_not_called()
 
     @pytest.mark.parametrize(
-        "content", ["[]", "null", '{"zero_ticks": "x", "alerted": false}', "{"]
+        "content",
+        [
+            "[]",
+            "null",
+            '{"zero_ticks": "x", "alerted": false}',
+            "{",
+            '{"zero_ticks": true, "alerted": false}',
+            '{"zero_ticks": -5, "alerted": false}',
+        ],
     )
     def test_corrupted_alert_file_is_rebuilt(
         self,
