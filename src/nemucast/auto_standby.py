@@ -289,6 +289,11 @@ def update_discovery_alert(
         alert_file.unlink(missing_ok=True)
         return False
 
+    if not alert["alerted"] and is_state_stale(alert):
+        # スリープ等で間が空いた前回の 0 台は連続と数えない
+        # （復帰直後の一瞬の 0 台で誤報しないため）。
+        # 通知済みの障害は継続中として扱い、カウントを戻さない
+        alert["zero_ticks"] = 0
     alert["zero_ticks"] += 1
     confirmed = alert["zero_ticks"] >= after_ticks
     if confirmed and not alert["alerted"]:

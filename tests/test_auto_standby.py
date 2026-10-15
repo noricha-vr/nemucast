@@ -416,3 +416,41 @@ class TestDiscoveryAlert:
         from nemucast import auto_standby
 
         assert auto_standby.send_discovery_alert("msg", command=command) is False
+
+    @staticmethod
+    def _age_alert_file(tmp_path: Path, seconds: float) -> None:
+        flag = tmp_path / "logs" / "discovery_alert_state.json"
+        data = json.loads(flag.read_text(encoding="utf-8"))
+        data["updated_at"] -= seconds
+        flag.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_zero_count_expires_across_scheduler_gap(
+        self, tmp_path: Path, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        """0 台 → スリープで長い間隔 → 復帰直後に 0 台、を連続と数えない（#31）"""
+        from nemucast import auto_standby
+
+        with fake_network([]):
+            auto_standby.main(args=["--name", "Dell"])
+        self._age_alert_file(tmp_path, auto_standby.AUTO_STATE_STALE_SEC + 60)
+        with fake_network([]):
+            auto_standby.main(args=["--name", "Dell"])
+
+        notify.assert_not_called()
+
+    def test_alerted_outage_continues_across_scheduler_gap(
+        self, tmp_path: Path, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        """通知済みの障害は間隔が空いても継続扱い（再通知もしない）"""
+        from nemucast import auto_standby
+
+        with fake_network([]):
+            auto_standby.main(args=["--name", "Dell"])
+        with fake_network([]), pytest.raises(SystemExit):
+            auto_standby.main(args=["--name", "Dell"])
+        self._age_alert_file(tmp_path, auto_standby.AUTO_STATE_STALE_SEC + 60)
+        with fake_network([]), pytest.raises(SystemExit) as exc:
+            auto_standby.main(args=["--name", "Dell"])
+
+        assert exc.value.code == auto_standby.EXIT_NO_DEVICE_ON_LAN
+        notify.assert_called_once()

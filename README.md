@@ -87,7 +87,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
   - `AUTO_STATE_STALE_SEC`: これ以上間が空いた state は連続カウントを捨てる秒数。既定 `1800`（15分 x 2）
   - `DISCOVERY_ALERT_COMMAND`: LAN 上の Chromecast が 1 台も見えない状態に入った時・抜けた時に 1 回ずつ実行する通知コマンド。本文を末尾の引数で渡す。既定は空（通知しない）
   - `DISCOVERY_ALERT_FILE`: 通知済みかを覚えるフラグファイル。既定 `logs/discovery_alert_state.json`
-  - `DISCOVERY_ALERT_AFTER_TICKS`: LAN 上 0 台が何回続いたら障害とみなすか。既定 `2`（スリープ復帰直後の一瞬の 0 台で誤報しないため）。`0` で判定しない（LAN に対象の Chromecast 1 台だけの家庭向け）
+  - `DISCOVERY_ALERT_AFTER_TICKS`: LAN 上 0 台が何回続いたら障害とみなすか。既定 `2`（スリープ復帰直後の一瞬の 0 台で誤報しないため）。`0` で判定しない（LAN に対象の Chromecast 1 台だけの家庭向け）。前回の 0 台から `AUTO_STATE_STALE_SEC` 以上空いた時は連続と数えない
   - `STEP`, `MANUAL_RISE_THRESHOLD`, `CHROMECAST_NAME` は他コマンドと共通
 - 終了コード: デバイスが見つからない場合は「寝かしつける対象がない」とみなして正常終了する（見つからない状態の方が長いため、失敗扱いにするとスケジューラの通知が埋もれる）
 - ただし LAN 上の Chromecast が 1 台も見えない時は環境側の障害（macOS のローカルネットワーク権限が外れた・ネットワーク断）とみなし、ERROR を出して終了コード 2 で終わる（`DISCOVERY_ALERT_AFTER_TICKS` 回続いた時）。目的デバイスが寝ていても他の Chromecast は常時 mDNS に出るため、0 台は通常起きない
