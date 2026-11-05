@@ -42,30 +42,60 @@ def host_cache_path() -> Path:
     return TV_CERT_DIR / "last_hosts.json"
 
 
+def identity_path() -> Path:
+    """名前ごとにペアリングしたテレビの MAC アドレス（接続先の本人確認用）の保存先。"""
+    return TV_CERT_DIR / "identities.json"
+
+
 def ensure_cert_dir() -> None:
     """証明書ディレクトリを 0700 で用意する。"""
     TV_CERT_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(TV_CERT_DIR, 0o700)
 
 
-def _load_host_cache() -> dict[str, str]:
+def _load_json_map(path: Path) -> dict[str, str]:
     try:
-        data = json.loads(host_cache_path().read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
 
+def _save_json_map(path: Path, name: str, value: str) -> None:
+    ensure_cert_dir()
+    data = _load_json_map(path)
+    data[name] = value
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    path.chmod(0o600)
+
+
 def load_cached_host(name: str) -> str | None:
-    host = _load_host_cache().get(name)
+    host = _load_json_map(host_cache_path()).get(name)
     return host if isinstance(host, str) and host else None
 
 
 def save_cached_host(name: str, host: str) -> None:
-    ensure_cert_dir()
-    cache = _load_host_cache()
-    cache[name] = host
-    host_cache_path().write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    _save_json_map(host_cache_path(), name, host)
+
+
+def load_identity(name: str) -> str | None:
+    mac = _load_json_map(identity_path()).get(name)
+    return mac if isinstance(mac, str) and mac else None
+
+
+def save_identity(name: str, mac: str) -> None:
+    _save_json_map(identity_path(), name, mac)
+
+
+async def read_mac(host: str) -> str:
+    """ペアリング用ポートの証明書からテレビの MAC アドレスを読む。"""
+    cert, key = cert_paths()
+    remote = AndroidTVRemote(CLIENT_NAME, str(cert), str(key), host)
+    try:
+        _, mac = await asyncio.wait_for(remote.async_get_name_and_mac(), CONNECT_TIMEOUT_SEC)
+    except (CannotConnect, InvalidAuth, TimeoutError, OSError) as exc:
+        raise TvPowerError(f"{host} の機器識別 (MAC) を読めません: {exc!r}") from exc
+    return mac.lower()
 
 
 async def _read_is_on(host: str) -> tuple[AndroidTVRemote, bool]:
@@ -96,15 +126,27 @@ async def _wait_off(remote: AndroidTVRemote) -> bool:
     return False
 
 
-async def power_off(host: str) -> str:
+async def power_off(host: str, expected_mac: str | None = None) -> str:
     """テレビの電源を切る。切れたことを新規接続で読み戻して確認する。
 
     Returns:
         "already_off"（元から切れていた）または "turned_off"（切った）。
 
+    Args:
+        host: テレビの IP。
+        expected_mac: ペアリング時に記録した MAC。指定時は送信前に照合する。
+
     Raises:
         TvPowerError: 接続できない・状態を読めない・リトライしても切れない。
     """
+    if expected_mac is not None:
+        actual = await read_mac(host)
+        if actual != expected_mac.lower():
+            raise TvPowerError(f"{host} はペアリングしたテレビではありません (MAC {actual})")
+    else:
+        logging.warning(
+            "テレビの MAC が未登録のため機器照合を省略します（nemucast-tv-pair で登録）"
+        )
     remote, is_on = await _read_is_on(host)
     if not is_on:
         remote.disconnect()

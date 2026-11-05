@@ -17,7 +17,15 @@ from androidtvremote2 import AndroidTVRemote, CannotConnect, ConnectionClosed, I
 
 from nemucast.cast_client import discover_chromecasts, stop_discovery
 from nemucast.config import CHROMECAST_NAME
-from nemucast.tv_power import CLIENT_NAME, cert_paths, ensure_cert_dir
+from nemucast.tv_power import (
+    CLIENT_NAME,
+    TvPowerError,
+    cert_paths,
+    ensure_cert_dir,
+    read_mac,
+    save_cached_host,
+    save_identity,
+)
 
 PIN_WAIT_SEC = 600
 PIN_POLL_SEC = 2
@@ -56,7 +64,7 @@ def _wait_pin(pin_file: Path) -> str | None:
     return None
 
 
-async def pair(host: str, pin_file: Path, need_file: Path) -> int:
+async def pair(name: str, host: str, pin_file: Path, need_file: Path) -> int:
     cert, key = cert_paths()
     ensure_cert_dir()
     remote = AndroidTVRemote(CLIENT_NAME, str(cert), str(key), host)
@@ -77,10 +85,15 @@ async def pair(host: str, pin_file: Path, need_file: Path) -> int:
     try:
         await remote.async_finish_pairing(pin)
     except (InvalidAuth, ConnectionClosed) as exc:
-        logging.error("ペアリング失敗（PIN 違い・取消し）: %r", exc)
+        logging.error("ペアリング失敗（PIN 違い・取消し）: %s", type(exc).__name__)
         return 1
     finally:
         pin_file.unlink(missing_ok=True)
+    try:
+        save_identity(name, await read_mac(host))
+        save_cached_host(name, host)
+    except (TvPowerError, OSError) as exc:
+        logging.warning("機器識別/IP の記録に失敗: %s", exc)
     logging.info("ペアリング完了: %s", cert)
     return 0
 
@@ -93,7 +106,7 @@ def main(args: list[str] | None = None) -> None:
     if host is None:
         _write_need(parsed.need_file, f"'{parsed.name}' が見つからず進めません（電源OFF/LAN外?）")
         sys.exit(1)
-    sys.exit(asyncio.run(pair(host, parsed.pin_file, parsed.need_file)))
+    sys.exit(asyncio.run(pair(parsed.name, host, parsed.pin_file, parsed.need_file)))
 
 
 if __name__ == "__main__":

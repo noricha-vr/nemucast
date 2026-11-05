@@ -69,7 +69,7 @@ class TestMain:
         assert "Missing" in alert.call_args.args[0]
 
     def test_power_off_failure_exits_nonzero_and_alerts(self) -> None:
-        async def boom(host: str) -> str:
+        async def boom(host: str, expected_mac: str | None = None) -> str:
             raise TvPowerError("切れない")
 
         with (
@@ -85,3 +85,23 @@ class TestMain:
 
 async def _done(value: str) -> str:
     return value
+
+
+def test_cache_save_failure_is_not_fatal() -> None:
+    with (
+        patch.object(standby, "discover_chromecasts", return_value=_fake_discovery("10.0.0.5")),
+        patch.object(standby, "stop_discovery"),
+        patch.object(standby, "save_cached_host", side_effect=OSError("denied")),
+    ):
+        assert standby.resolve_host("Living") == "10.0.0.5"
+
+
+def test_oserror_exits_nonzero_and_alerts() -> None:
+    with (
+        patch.object(standby, "resolve_host", side_effect=OSError("boom")),
+        patch.object(standby, "send_discovery_alert") as alert,
+    ):
+        with pytest.raises(SystemExit) as exc:
+            standby.main(args=["--name", "Living"])
+    assert exc.value.code == 1
+    alert.assert_called_once()

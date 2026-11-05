@@ -25,6 +25,7 @@ from nemucast.config import (
 from nemucast.tv_power import (
     TvPowerError,
     load_cached_host,
+    load_identity,
     power_off,
     save_cached_host,
 )
@@ -66,7 +67,10 @@ def resolve_host(name: str) -> str:
     try:
         if cast is not None:
             host = cast.cast_info.host
-            save_cached_host(name, host)
+            try:
+                save_cached_host(name, host)
+            except OSError as exc:
+                logging.warning("IP のキャッシュ保存に失敗（続行）: %s", exc)
             return host
     finally:
         stop_discovery(browser)
@@ -83,8 +87,8 @@ def main(args: list[str] | None = None) -> None:
     logging.info("テレビ電源OFF 要求: device=%s", parsed.name)
     try:
         host = resolve_host(parsed.name)
-        result = asyncio.run(power_off(host))
-    except TvPowerError as exc:
+        result = asyncio.run(power_off(host, load_identity(parsed.name)))
+    except (TvPowerError, OSError) as exc:
         message = f"nemucast: テレビ '{parsed.name}' の電源を切れませんでした: {exc}"
         logging.error(message)
         send_discovery_alert(message)

@@ -71,3 +71,21 @@ def test_connection_failure_raises() -> None:
     with patch.object(FakeRemote, "async_connect", fail):
         with pytest.raises(TvPowerError):
             asyncio.run(power_off("h"))
+
+
+def test_mac_mismatch_refuses_to_send(monkeypatch) -> None:
+    async def other_mac(host: str) -> str:
+        return "aa:bb:cc:dd:ee:ff"
+
+    monkeypatch.setattr(tv_power, "read_mac", other_mac)
+    with pytest.raises(TvPowerError):
+        asyncio.run(power_off("h", expected_mac="11:22:33:44:55:66"))
+    assert FakeRemote.sent == 0
+
+
+def test_mac_match_proceeds(monkeypatch) -> None:
+    async def same_mac(host: str) -> str:
+        return "11:22:33:44:55:66"
+
+    monkeypatch.setattr(tv_power, "read_mac", same_mac)
+    assert asyncio.run(power_off("h", expected_mac="11:22:33:44:55:66")) == "turned_off"
