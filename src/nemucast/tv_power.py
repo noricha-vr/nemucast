@@ -154,6 +154,12 @@ async def power_off(host: str, expected_mac: str | None = None) -> str:
         return "already_off"
 
     for attempt in range(1, TV_POWER_MAX_ATTEMPTS + 1):
+        # POWER はトグル。読んでから送るまでに状態が変わっていたら（テレビ側の push は接続中に
+        # 随時届く）送らない。True と確認できている時だけ送る
+        if remote.is_on is not True:
+            remote.disconnect()
+            logging.info("テレビ %s は送信直前に電源OFFになっていました。何も送りません。", host)
+            return "already_off"
         logging.info("テレビ %s に %s を送信します（%d 回目）", host, TV_POWER_KEY, attempt)
         try:
             remote.send_key_command(TV_POWER_KEY)
