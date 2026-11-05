@@ -1,27 +1,19 @@
-"""15分間隔の最小ロジックで Chromecast を寝かしつけるスクリプト。
-
-ロジック:
-  1. 電源OFF状態 (powered_off=True) なら、音量上昇または active app を再開として扱う。
-     どちらも見えなければ何もしない。
-  2. 直前 script が下げた値より現在音量が上がっていれば、連続下げカウントを 0 に戻す。
-  3. 連続下げカウントが AUTO_LOWERED_THRESHOLD 以上なら quit_app を呼んで電源OFF。
-  4. それ以外は音量を STEP だけ下げ、カウントを +1 する。
-
-state ファイルは tick 間で読み書きされる単純な JSON。`volume.py` / `state.py`
-の機構には依存しない。
-"""
+"""夜間だけ音量を段階的に下げ、テレビ本体の電源OFFを確認する。"""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import logging.handlers
+import math
 import os
 import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -29,10 +21,13 @@ from typing import Any
 from nemucast.cast_client import (
     discover_chromecasts,
     get_current_volume,
-    standby_device,
     stop_discovery,
 )
 from nemucast.config import (
+    AUTO_NIGHT_END,
+    AUTO_NIGHT_FORCE,
+    AUTO_NIGHT_START,
+    AUTO_RESTORE_VOLUME,
     CHROMECAST_NAME,
     CONNECT_TIMEOUT_SEC,
     DISCOVERY_ALERT_AFTER_TICKS,
@@ -44,6 +39,7 @@ from nemucast.config import (
     MANUAL_RISE_THRESHOLD,
     STEP,
 )
+from nemucast.tv_power import TvPowerError, load_identity, power_off, read_power_state
 
 AUTO_MIN_LEVEL = float(os.getenv("AUTO_MIN_LEVEL", "0.05"))
 AUTO_LOWERED_THRESHOLD = int(os.getenv("AUTO_LOWERED_THRESHOLD", "3"))
@@ -58,7 +54,6 @@ EXIT_NO_DEVICE_ON_LAN = 2
 class TickResult(Enum):
     LOWERED = "lowered"
     STANDBY = "standby"
-    SKIP = "skip"
 
 
 def fresh_state(device_name: str) -> dict[str, Any]:
@@ -66,8 +61,7 @@ def fresh_state(device_name: str) -> dict[str, Any]:
         "device_name": device_name,
         "last_lowered_to": None,
         "consecutive_lowered": 0,
-        "powered_off": False,
-        "volume_at_power_off": None,
+        "original_volume": None,
         "updated_at": time.time(),
     }
 
@@ -80,26 +74,43 @@ def is_state_stale(state: dict[str, Any], stale_sec: int = AUTO_STATE_STALE_SEC)
     return time.time() - updated_at > stale_sec
 
 
+def valid_session_state(data: dict[str, Any]) -> bool:
+    """不正なカウントや復元音量を操作に使わない。旧 state の欠落キーは許容する。"""
+    count = data.get("consecutive_lowered", 0)
+    if type(count) is not int or count < 0:
+        return False
+    for key in ("original_volume", "last_lowered_to"):
+        value = data.get(key)
+        if value is not None and (
+            type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1
+        ):
+            return False
+    return True
+
+
 def load_state(state_file: Path, device_name: str) -> dict[str, Any] | None:
     if not state_file.exists():
         return None
     try:
         data = json.loads(state_file.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
+    except (ValueError, OSError) as exc:
         # 壊れた state を放置すると毎 tick 例外で落ち続け、15 分間隔のジョブが自力復帰できない
         logging.warning("state を読めなかったため作り直します: %s", exc)
         return None
     if not isinstance(data, dict) or data.get("device_name") != device_name:
         return None
-    if is_state_stale(data):
-        # powered_off は「音量上昇 / active app まで何もしない」という不変条件なので跨いで維持する
-        if data.get("powered_off"):
-            return data
-        # スケジューラ停止（スリープ等）を挟むと連続カウントが実態とずれ、
-        # 視聴再開直後に quit_app してしまうため、カウントは捨てて数え直す
+    if not valid_session_state(data):
+        logging.warning("state のカウントまたは音量が不正なため作り直します。")
+        return None
+    state = fresh_state(device_name)
+    state.update({key: data[key] for key in state if key in data})
+    state["updated_at"] = data.get("updated_at")
+    if is_state_stale(state) and state["consecutive_lowered"] < AUTO_LOWERED_THRESHOLD:
+        # 音量復元の責任は時間切れでも消さない。電源OFF待ちも次 tick で再試行する
         logging.info("前回更新から時間が空いたため連続カウントをリセットします。")
-        return fresh_state(device_name)
-    return data
+        state["consecutive_lowered"] = 0
+        state["last_lowered_to"] = None
+    return state
 
 
 def save_state(state_file: Path, state: dict[str, Any]) -> None:
@@ -114,17 +125,14 @@ def save_state(state_file: Path, state: dict[str, Any]) -> None:
     os.replace(tmp_file, state_file)
 
 
-def get_active_app_label(cast: Any) -> str | None:
-    """Return the Chromecast app label when the device appears active."""
-    status = getattr(cast, "status", None)
-    if status is None:
-        return None
-
-    for attr in ("app_id", "display_name"):
-        value = getattr(status, attr, None)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+def in_night_window(now: datetime, start: str, end: str) -> bool:
+    """ローカル時刻が夜間窓 [start, end) に入るか返す。同時刻なら空の窓。"""
+    start_time = datetime.strptime(start, "%H:%M").time()
+    end_time = datetime.strptime(end, "%H:%M").time()
+    current = now.time().replace(tzinfo=None)
+    if start_time <= end_time:
+        return start_time <= current < end_time
+    return current >= start_time or current < end_time
 
 
 def run_tick(
@@ -136,59 +144,82 @@ def run_tick(
     lowered_threshold: int = AUTO_LOWERED_THRESHOLD,
     rise_threshold: float = MANUAL_RISE_THRESHOLD,
 ) -> tuple[TickResult, dict[str, Any]]:
-    """1 tick 分の判定と操作を行い、(結果, 更新後 state) を返す。"""
+    """点灯確認済みのテレビで音量を下げる。電源制御は呼び出し側で行う。"""
+    # 前 tick で復元後に電源OFFが失敗した場合、復元音量を手動上昇と誤認しない
+    if state.get("consecutive_lowered", 0) >= lowered_threshold:
+        return TickResult.STANDBY, state
     current = get_current_volume(cast)
-    logging.info("現在の音量: %.2f (state=%s)", current, state)
-
-    # 1. 電源OFF状態の継続処理
-    if state.get("powered_off"):
-        baseline = state.get("volume_at_power_off")
-        active_app = get_active_app_label(cast)
-        volume_rose = baseline is not None and current > baseline + rise_threshold
-        if not volume_rose and active_app is None:
-            logging.info("電源OFF状態を維持。何もしません。")
-            return TickResult.SKIP, state
-        if volume_rose:
-            logging.info(
-                "音量上昇を検知 (%.2f → %.2f)。state をリセットして再開します。",
-                baseline,
-                current,
-            )
-        else:
-            logging.info("active app (%s) を検知。state をリセットして再開します。", active_app)
-        state = fresh_state(state["device_name"])
-
-    # 2. 手動上昇の検知 → カウントリセット
     last_lowered_to = state.get("last_lowered_to")
     if last_lowered_to is not None and current > last_lowered_to + rise_threshold:
-        logging.info(
-            "手動で音量が上げられました (%.2f → %.2f)。連続カウントをリセット。",
-            last_lowered_to,
-            current,
-        )
+        logging.info("手動音量上昇: previous=%.2f current=%.2f", last_lowered_to, current)
         state["consecutive_lowered"] = 0
-
-    # 3. 閾値到達なら電源OFF
-    if state.get("consecutive_lowered", 0) >= lowered_threshold:
-        standby_device(cast)
-        state["powered_off"] = True
-        state["volume_at_power_off"] = current
-        return TickResult.STANDBY, state
-
-    # 4. 音量を下げる（最小値以下なら下げないがカウントは進める）
+        state["original_volume"] = current
+    if state.get("original_volume") is None:
+        state["original_volume"] = current
     next_volume = round(max(current + step, min_level), 2)
     if next_volume < current:
         cast.set_volume(next_volume)
-        logging.info("音量を %.2f → %.2f に変更しました。", current, next_volume)
-        state["last_lowered_to"] = next_volume
+        logging.info("音量変更: previous=%.2f current=%.2f", current, next_volume)
     else:
-        logging.info(
-            "現在音量 %.2f は最小値 %.2f 以下のため下げません。カウントのみ進めます。",
-            current,
-            min_level,
-        )
+        logging.info("音量下限のためカウントのみ進めます: current=%.2f", current)
+    state["last_lowered_to"] = min(current, next_volume)
     state["consecutive_lowered"] = state.get("consecutive_lowered", 0) + 1
-    return TickResult.LOWERED, state
+    result = (
+        TickResult.STANDBY
+        if state["consecutive_lowered"] >= lowered_threshold
+        else TickResult.LOWERED
+    )
+    return result, state
+
+
+def restore_volume(cast: Any, state: dict[str, Any]) -> None:
+    """点灯確認済みのテレビをセッション開始時の音量に戻す。"""
+    original = state.get("original_volume")
+    if original is not None:
+        cast.set_volume(original)
+        logging.info("音量復元: original_volume=%.2f", original)
+
+
+def process_device(cast: Any, name: str, state: dict[str, Any], *, cleanup: bool) -> None:
+    """電源状態を先に確認し、点灯中だけ音量操作と電源OFFを行う。"""
+    host = cast.cast_info.host
+    expected_mac = load_identity(name)
+    if not asyncio.run(read_power_state(host, expected_mac)):
+        save_state(AUTO_STATE_FILE, fresh_state(name))
+        logging.info("tick 結果: already_off device=%s", name)
+        return
+    cast.wait(timeout=CONNECT_TIMEOUT_SEC)
+    if cleanup:
+        restore_volume(cast, state)
+        save_state(AUTO_STATE_FILE, fresh_state(name))
+        logging.info("tick 結果: cleanup device=%s", name)
+        return
+    result, state = run_tick(cast, state)
+    # 復元・電源OFF前に保存し、失敗や中断時も original_volume とカウントを残す
+    save_state(AUTO_STATE_FILE, state)
+    if result is TickResult.STANDBY:
+        if AUTO_RESTORE_VOLUME:
+            restore_volume(cast, state)
+        outcome = asyncio.run(power_off(host, expected_mac))
+        save_state(AUTO_STATE_FILE, fresh_state(name))
+        logging.info("tick 結果: %s device=%s", outcome, name)
+        return
+    logging.info("tick 結果: %s count=%d", result.value, state["consecutive_lowered"])
+
+
+def cleanup_session(name: str, state: dict[str, Any]) -> None:
+    """時間外の進行中セッションだけ後始末する。失敗時は次 tick まで保持する。"""
+    browser = None
+    try:
+        cast, browser = discover_chromecasts(name)
+        if cast is None:
+            logging.warning("時間外の音量復元を保留: device=%s が見つかりません", name)
+            return
+        process_device(cast, name, state, cleanup=True)
+    except (TvPowerError, OSError, RuntimeError) as exc:
+        logging.warning("時間外の音量復元を保留: %s", exc)
+    finally:
+        stop_discovery(browser)
 
 
 def setup_logging() -> None:
@@ -310,6 +341,21 @@ def main(args: list[str] | None = None) -> None:
     parsed = parse_args(args)
     setup_logging()
 
+    state = load_state(AUTO_STATE_FILE, parsed.name) or fresh_state(parsed.name)
+    try:
+        night = AUTO_NIGHT_FORCE or in_night_window(
+            datetime.now(), AUTO_NIGHT_START, AUTO_NIGHT_END
+        )
+    except ValueError as exc:
+        logging.error("夜間時刻の設定が不正です: %s", exc)
+        sys.exit(1)
+    if not night:
+        if state.get("original_volume") is not None:
+            cleanup_session(parsed.name, state)
+        else:
+            logging.info("tick 結果: outside_window")
+        return
+
     cast, browser = discover_chromecasts(parsed.name)
     lan_has_devices = browser is not None and len(browser.devices) > 0
     if not lan_has_devices:
@@ -336,13 +382,14 @@ def main(args: list[str] | None = None) -> None:
         return
 
     try:
-        # timeout なしだと discovery 後に落ちたデバイス相手に無限待ちになり、
-        # 15分ごとにプロセスが積み上がる
-        cast.wait(timeout=CONNECT_TIMEOUT_SEC)
-        state = load_state(AUTO_STATE_FILE, parsed.name) or fresh_state(parsed.name)
-        result, new_state = run_tick(cast=cast, state=state)
-        save_state(AUTO_STATE_FILE, new_state)
-        logging.info("tick 結果: %s", result.value)
+        process_device(cast, parsed.name, state, cleanup=False)
+    except TvPowerError as exc:
+        message = f"nemucast: テレビ '{parsed.name}' の夜間制御に失敗しました: {exc}"
+        logging.error(message)
+        # 一晩 15 分おきの通知で埋もれないよう、通知は進行中（音量を下げ始めた後）だけ
+        if state.get("original_volume") is not None:
+            send_discovery_alert(message)
+        sys.exit(1)
     finally:
         stop_discovery(browser)
 

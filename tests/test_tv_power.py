@@ -122,3 +122,68 @@ def test_never_sends_when_connect_fails_midway(monkeypatch) -> None:
     with pytest.raises(TvPowerError):
         asyncio.run(power_off("h"))
     assert FakeRemote.sent == 0
+
+
+@pytest.mark.parametrize("is_on", [True, False])
+def test_read_power_state_matches_mac_without_sending(is_on, monkeypatch) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    remote = Mock()
+    monkeypatch.setattr(tv_power, "read_mac", AsyncMock(return_value="aa:bb"))
+    monkeypatch.setattr(tv_power, "_read_is_on", AsyncMock(return_value=(remote, is_on)))
+    assert asyncio.run(tv_power.read_power_state("h", "AA:BB")) is is_on
+    remote.disconnect.assert_called_once()
+    remote.send_key_command.assert_not_called()
+
+
+@pytest.mark.parametrize("expected", [None, "different"])
+def test_read_power_state_requires_identity_match(expected, monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(tv_power, "read_mac", AsyncMock(return_value="aa:bb"))
+    read_state = AsyncMock()
+    monkeypatch.setattr(tv_power, "_read_is_on", read_state)
+    with pytest.raises(TvPowerError):
+        asyncio.run(tv_power.read_power_state("h", expected))
+    read_state.assert_not_called()
+    assert FakeRemote.sent == 0
+
+
+@pytest.mark.parametrize("failure", ["connect", "unknown", "mac"])
+def test_read_power_state_failure_never_sends(failure, monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(tv_power, "read_mac", AsyncMock(return_value="aa:bb"))
+    if failure == "connect":
+        monkeypatch.setattr(
+            FakeRemote, "async_connect", AsyncMock(side_effect=tv_power.CannotConnect)
+        )
+    elif failure == "mac":
+        monkeypatch.setattr(tv_power, "read_mac", AsyncMock(side_effect=TvPowerError("no MAC")))
+    else:
+        monkeypatch.setattr(tv_power, "IS_ON_READ_SEC", 0)
+        monkeypatch.setattr(FakeRemote, "is_on", property(lambda self: None))
+    with pytest.raises(TvPowerError):
+        asyncio.run(tv_power.read_power_state("h", "aa:bb"))
+    assert FakeRemote.sent == 0
+
+
+def test_read_power_state_disconnects_when_reader_returns_unknown(monkeypatch) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    remote = Mock()
+    monkeypatch.setattr(tv_power, "read_mac", AsyncMock(return_value="aa:bb"))
+    monkeypatch.setattr(tv_power, "_read_is_on", AsyncMock(return_value=(remote, None)))
+    with pytest.raises(TvPowerError):
+        asyncio.run(tv_power.read_power_state("h", "aa:bb"))
+    remote.disconnect.assert_called_once()
+    remote.send_key_command.assert_not_called()
+
+
+def test_read_power_state_wraps_disconnect_during_identity_read(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(tv_power, "read_mac", AsyncMock(side_effect=tv_power.ConnectionClosed))
+    with pytest.raises(TvPowerError):
+        asyncio.run(tv_power.read_power_state("h", "aa:bb"))
+    assert FakeRemote.sent == 0

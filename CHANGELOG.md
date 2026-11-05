@@ -3,10 +3,12 @@
 ## [Unreleased]
 
 ### Changed
+- `nemucast-auto`: 既定 00:30〜05:00 だけ段階的に音量を下げ、3 回目の tick で Android TV Remote によるテレビ本体の電源 OFF を読み戻して確認する。点灯中に元の音量へ戻してから切り、消灯・状態不明なら音量にも POWER にも触れない。時間外は進行中セッションだけ後始末し、失敗時の元音量と電源 OFF 待ちは次回へ保持する
 - `nemucast-standby`: `quit_app`（ホーム画面に戻るだけで電源は切れていなかった）をやめ、Android TV Remote v2 の POWER でテレビ本体の電源を切る。`is_on` を見て点いている時だけ送り、読み戻しで確認する。見つからない・接続できない・切れない時は終了コード 1 と Discord 通知（従来は WARNING のまま成功扱い）
 - ログの「スタンバイモードになりました」は実際に読み戻せた時だけ出す
 
 ### Added
+- 夜間設定 `AUTO_NIGHT_START` / `AUTO_NIGHT_END` / `AUTO_NIGHT_FORCE` / `AUTO_RESTORE_VOLUME` と を README に記載
 - `nemucast-tv-pair`: テレビとの初回ペアリング。環境変数 `TV_CERT_DIR` / `TV_POWER_KEY` / `TV_POWER_WAIT_SEC` / `TV_POWER_MAX_ATTEMPTS`
 - 依存に `androidtvremote2==0.3.2` を追加
 

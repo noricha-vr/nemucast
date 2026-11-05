@@ -6,16 +6,17 @@ import json
 import subprocess
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from nemucast.auto_standby import (
     TickResult,
     fresh_state,
-    get_active_app_label,
+    in_night_window,
     load_state,
     run_tick,
     save_state,
@@ -30,137 +31,83 @@ def make_cast(volume: float) -> Mock:
     return cast
 
 
+@pytest.fixture(autouse=True)
+def isolated_auto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """実時刻や実機・ホームの identity に依存させない。"""
+    from nemucast import auto_standby
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(auto_standby, "AUTO_NIGHT_FORCE", True)
+    monkeypatch.setattr(auto_standby, "AUTO_RESTORE_VOLUME", True)
+    monkeypatch.setattr(auto_standby, "AUTO_STATE_FILE", tmp_path / "auto.json")
+    monkeypatch.setattr(auto_standby, "load_identity", Mock(return_value="aa:bb"))
+    monkeypatch.setattr(auto_standby, "read_power_state", AsyncMock(return_value=True))
+    monkeypatch.setattr(auto_standby, "power_off", AsyncMock(return_value="turned_off"))
+
+
 class TestRunTick:
-    def test_lower_volume_first_tick(self) -> None:
+    def test_first_tick_saves_original(self) -> None:
         cast = make_cast(0.50)
-        state = fresh_state("Dell")
-        result, new_state = run_tick(cast=cast, state=state, step=-0.04, min_level=0.05)
-
-        assert result == TickResult.LOWERED
-        cast.set_volume.assert_called_once_with(0.46)
-        assert new_state["last_lowered_to"] == 0.46
-        assert new_state["consecutive_lowered"] == 1
-        assert new_state["powered_off"] is False
-
-    def test_three_consecutive_lowered_triggers_standby(self) -> None:
-        cast = make_cast(0.10)
-        state = fresh_state("Dell")
-        state["consecutive_lowered"] = 3
-        state["last_lowered_to"] = 0.10
-
-        result, new_state = run_tick(cast=cast, state=state, step=-0.04, min_level=0.05)
-
-        assert result == TickResult.STANDBY
-        cast.quit_app.assert_called_once()
-        cast.set_volume.assert_not_called()
-        assert new_state["powered_off"] is True
-        assert new_state["volume_at_power_off"] == 0.10
-
-    def test_manual_rise_resets_counter(self) -> None:
-        cast = make_cast(0.50)  # 手動で上げた値
-        state = fresh_state("Dell")
-        state["consecutive_lowered"] = 2
-        state["last_lowered_to"] = 0.42  # script が下げた直近値
-
-        result, new_state = run_tick(cast=cast, state=state, step=-0.04, min_level=0.05)
-
-        assert result == TickResult.LOWERED
-        assert new_state["consecutive_lowered"] == 1  # 0 にリセット → +1 で 1
+        result, state = run_tick(cast, fresh_state("Dell"))
+        assert result is TickResult.LOWERED
+        assert state["original_volume"] == 0.50
+        assert state["consecutive_lowered"] == 1
         cast.set_volume.assert_called_once_with(0.46)
 
-    def test_powered_off_with_no_rise_does_nothing(self) -> None:
-        cast = make_cast(0.10)
+    def test_third_lower_reaches_threshold(self) -> None:
         state = fresh_state("Dell")
-        state["powered_off"] = True
-        state["volume_at_power_off"] = 0.10
-
-        result, new_state = run_tick(cast=cast, state=state, step=-0.04, min_level=0.05)
-
-        assert result == TickResult.SKIP
-        cast.set_volume.assert_not_called()
+        for count, volume in enumerate([0.50, 0.46, 0.42], start=1):
+            cast = make_cast(volume)
+            result, state = run_tick(cast, state)
+            assert state["consecutive_lowered"] == count
+        assert result is TickResult.STANDBY
+        assert state["original_volume"] == 0.50
         cast.quit_app.assert_not_called()
-        assert new_state["powered_off"] is True
 
-    def test_powered_off_with_rise_resumes_session(self) -> None:
-        cast = make_cast(0.40)  # ユーザーが復帰、音量上昇
+    def test_manual_rise_updates_original_and_resets_count(self) -> None:
         state = fresh_state("Dell")
-        state["powered_off"] = True
-        state["volume_at_power_off"] = 0.10
+        state.update(consecutive_lowered=2, last_lowered_to=0.42, original_volume=0.5)
+        result, state = run_tick(make_cast(0.60), state)
+        assert result is TickResult.LOWERED
+        assert state["consecutive_lowered"] == 1
+        assert state["original_volume"] == 0.60
 
-        result, new_state = run_tick(cast=cast, state=state, step=-0.04, min_level=0.05)
-
-        assert result == TickResult.LOWERED
-        assert new_state["powered_off"] is False
-        assert new_state["volume_at_power_off"] is None
-        assert new_state["consecutive_lowered"] == 1
-        cast.set_volume.assert_called_once_with(0.36)
-
-    def test_powered_off_with_active_app_resumes_session_without_volume_rise(self) -> None:
-        cast = make_cast(0.10)
-        cast.status.app_id = "AndroidNativeApp"
-        state = fresh_state("Dell")
-        state["powered_off"] = True
-        state["volume_at_power_off"] = 0.10
-
-        result, new_state = run_tick(cast=cast, state=state, step=-0.04, min_level=0.05)
-
-        assert result == TickResult.LOWERED
-        assert new_state["powered_off"] is False
-        assert new_state["consecutive_lowered"] == 1
-        cast.set_volume.assert_called_once_with(0.06)
-
-    def test_min_level_does_not_set_volume_but_increments_count(self) -> None:
-        cast = make_cast(0.05)
-        state = fresh_state("Dell")
-        state["last_lowered_to"] = 0.05
-        state["consecutive_lowered"] = 1
-
-        result, new_state = run_tick(cast=cast, state=state, step=-0.04, min_level=0.05)
-
-        assert result == TickResult.LOWERED
+    @pytest.mark.parametrize("volume", [0.05, 0.02])
+    def test_below_minimum_never_raises_volume(self, volume: float) -> None:
+        cast = make_cast(volume)
+        _, state = run_tick(cast, fresh_state("Dell"))
         cast.set_volume.assert_not_called()
-        assert new_state["consecutive_lowered"] == 2
+        assert state["consecutive_lowered"] == 1
+        assert state["last_lowered_to"] == volume
 
-    def test_full_cycle_three_lowers_then_standby(self) -> None:
-        """tick を 4 回回して 4 回目で quit_app に到達することを確認"""
+    def test_pending_power_off_does_not_misread_restored_volume(self) -> None:
+        cast = make_cast(0.5)
         state = fresh_state("Dell")
-        volumes = [0.50, 0.46, 0.42, 0.38]
-
-        # tick 1〜3: lower
-        for i, v in enumerate(volumes[:3], start=1):
-            cast = make_cast(v)
-            result, state = run_tick(cast=cast, state=state, step=-0.04, min_level=0.05)
-            assert result == TickResult.LOWERED, f"tick {i}"
-            assert state["consecutive_lowered"] == i
-
-        # tick 4: standby
-        cast = make_cast(volumes[3])
-        result, state = run_tick(cast=cast, state=state, step=-0.04, min_level=0.05)
-        assert result == TickResult.STANDBY
-        cast.quit_app.assert_called_once()
-        assert state["powered_off"] is True
-        assert state["volume_at_power_off"] == 0.38
+        state.update(consecutive_lowered=3, original_volume=0.5, last_lowered_to=0.38)
+        result, state = run_tick(cast, state)
+        assert result is TickResult.STANDBY
+        assert state["consecutive_lowered"] == 3
+        cast.set_volume.assert_not_called()
 
 
-class TestActiveAppLabel:
-    def test_returns_app_id_first(self) -> None:
-        cast = make_cast(0.10)
-        cast.status.app_id = "E8C28D3C"
-        cast.status.display_name = "YouTube"
-
-        assert get_active_app_label(cast) == "E8C28D3C"
-
-    def test_uses_display_name_when_app_id_missing(self) -> None:
-        cast = make_cast(0.10)
-        cast.status.display_name = "YouTube"
-
-        assert get_active_app_label(cast) == "YouTube"
-
-    def test_ignores_mock_placeholder_values(self) -> None:
-        cast = Mock()
-        cast.status.volume_level = 0.10
-
-        assert get_active_app_label(cast) is None
+@pytest.mark.parametrize(
+    "clock,start,end,expected",
+    [
+        ("00:29:59", "00:30", "05:00", False),
+        ("00:30:00", "00:30", "05:00", True),
+        ("04:59:59", "00:30", "05:00", True),
+        ("05:00:00", "00:30", "05:00", False),
+        ("12:00:00", "00:30", "05:00", False),
+        ("23:00:00", "23:00", "02:00", True),
+        ("00:00:00", "23:00", "02:00", True),
+        ("01:59:59", "23:00", "02:00", True),
+        ("02:00:00", "23:00", "02:00", False),
+        ("22:59:59", "23:00", "02:00", False),
+        ("00:30:00", "00:30", "00:30", False),
+    ],
+)
+def test_night_window(clock: str, start: str, end: str, expected: bool) -> None:
+    assert in_night_window(datetime.fromisoformat(f"2026-11-05T{clock}"), start, end) is expected
 
 
 class TestStatePersistence:
@@ -223,20 +170,18 @@ class TestStatePersistence:
         assert loaded["consecutive_lowered"] == 0
         assert loaded["last_lowered_to"] is None
 
-    def test_stale_state_keeps_powered_off(self, tmp_path: Path) -> None:
-        """電源OFF状態は時間が空いても維持する（勝手に音量を下げ直さないこと）"""
+    @pytest.mark.parametrize("count", [2, 3])
+    def test_stale_state_keeps_original_and_pending_shutdown(
+        self, tmp_path: Path, count: int
+    ) -> None:
         path = tmp_path / "state.json"
         state = fresh_state("Dell")
-        state["powered_off"] = True
-        state["volume_at_power_off"] = 0.5
+        state.update(consecutive_lowered=count, original_volume=0.5)
         state["updated_at"] = time.time() - 86400
         path.write_text(json.dumps(state), encoding="utf-8")
-
         loaded = load_state(path, "Dell")
-
-        assert loaded is not None
-        assert loaded["powered_off"] is True
-        assert loaded["volume_at_power_off"] == 0.5
+        assert loaded["original_volume"] == 0.5
+        assert loaded["consecutive_lowered"] == (3 if count == 3 else 0)
 
 
 class TestMain:
@@ -454,3 +399,239 @@ class TestDiscoveryAlert:
 
         assert exc.value.code == auto_standby.EXIT_NO_DEVICE_ON_LAN
         notify.assert_called_once()
+
+
+class TestNightMain:
+    @pytest.fixture
+    def outside(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nemucast import auto_standby
+
+        monkeypatch.setattr(auto_standby, "AUTO_NIGHT_FORCE", False)
+        monkeypatch.setattr(auto_standby, "in_night_window", Mock(return_value=False))
+
+    def test_outside_does_not_discover_or_connect(self, outside: None, monkeypatch) -> None:
+        from nemucast import auto_standby
+
+        discover = Mock(side_effect=AssertionError("network forbidden"))
+        monkeypatch.setattr(auto_standby, "discover_chromecasts", discover)
+        auto_standby.main(["--name", "Dell"])
+        discover.assert_not_called()
+        auto_standby.read_power_state.assert_not_called()
+        auto_standby.power_off.assert_not_called()
+
+    def test_force_bypasses_window(self, fake_network, monkeypatch) -> None:
+        from nemucast import auto_standby
+
+        window = Mock(side_effect=AssertionError("force bypass"))
+        monkeypatch.setattr(auto_standby, "in_night_window", window)
+        with fake_network(["Dell"]) as net:
+            net["casts"]["Dell"].status.volume_level = 0.5
+            auto_standby.main(["--name", "Dell"])
+        window.assert_not_called()
+        auto_standby.read_power_state.assert_awaited_once()
+
+    @pytest.mark.parametrize("power", [False, "unknown"])
+    def test_off_or_unknown_never_changes_volume_or_sends_power(
+        self, power, fake_network, monkeypatch
+    ) -> None:
+        from nemucast import auto_standby
+        from nemucast.tv_power import TvPowerError
+
+        reader = auto_standby.read_power_state
+        reader.return_value = power
+        if power == "unknown":
+            reader.side_effect = TvPowerError("unknown")
+        monkeypatch.setattr(auto_standby, "send_discovery_alert", Mock())
+        with fake_network(["Dell"]) as net:
+            cast = net["casts"]["Dell"]
+            if power == "unknown":
+                with pytest.raises(SystemExit) as exc:
+                    auto_standby.main(["--name", "Dell"])
+                assert exc.value.code == 1
+            else:
+                auto_standby.main(["--name", "Dell"])
+                assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["original_volume"] is None
+        cast.set_volume.assert_not_called()
+        cast.wait.assert_not_called()
+        cast.quit_app.assert_not_called()
+        auto_standby.power_off.assert_not_called()
+        net["browser"].stop_discovery.assert_called_once()
+
+    @staticmethod
+    def seed_session(count: int = 2) -> None:
+        from nemucast import auto_standby
+
+        state = fresh_state("Dell")
+        state.update(original_volume=0.5, last_lowered_to=0.42, consecutive_lowered=count)
+        save_state(auto_standby.AUTO_STATE_FILE, state)
+
+    def test_restore_before_power_off_and_reset(self, fake_network, monkeypatch) -> None:
+        from nemucast import auto_standby
+
+        self.seed_session()
+        calls = Mock()
+        with fake_network(["Dell"]) as net:
+            cast = net["casts"]["Dell"]
+            cast.status.volume_level = 0.42
+            calls.attach_mock(cast.set_volume, "volume")
+            calls.attach_mock(auto_standby.read_power_state, "read")
+            calls.attach_mock(cast.wait, "wait")
+            calls.attach_mock(auto_standby.power_off, "off")
+            auto_standby.main(["--name", "Dell"])
+        assert [call[0] for call in calls.mock_calls] == ["read", "wait", "volume", "volume", "off"]
+        assert calls.mock_calls[2].args == (0.38,)
+        assert calls.mock_calls[3].args == (0.5,)
+        assert auto_standby.power_off.await_args.args == (
+            cast.cast_info.host,
+            auto_standby.load_identity.return_value,
+        )
+        state = load_state(auto_standby.AUTO_STATE_FILE, "Dell")
+        assert state["original_volume"] is None
+        assert state["consecutive_lowered"] == 0
+
+    def test_power_failure_preserves_state_and_retries(self, fake_network, monkeypatch) -> None:
+        from nemucast import auto_standby
+        from nemucast.tv_power import TvPowerError
+
+        self.seed_session()
+        auto_standby.power_off.side_effect = TvPowerError("not off")
+        notify = Mock()
+        monkeypatch.setattr(auto_standby, "send_discovery_alert", notify)
+        with fake_network(["Dell"]) as net:
+            net["casts"]["Dell"].status.volume_level = 0.42
+            with pytest.raises(SystemExit) as exc:
+                auto_standby.main(["--name", "Dell"])
+        assert exc.value.code == 1
+        state = load_state(auto_standby.AUTO_STATE_FILE, "Dell")
+        assert state["consecutive_lowered"] == 3
+        assert state["original_volume"] == 0.5
+        notify.assert_called_once()
+        auto_standby.power_off.side_effect = None
+        with fake_network(["Dell"]) as net:
+            cast = net["casts"]["Dell"]
+            cast.status.volume_level = 0.5  # 失敗前に戻した音量
+            auto_standby.main(["--name", "Dell"])
+        cast.set_volume.assert_called_once_with(0.5)
+        assert auto_standby.power_off.await_count == 2
+        assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["original_volume"] is None
+
+    def test_restore_can_be_disabled(self, fake_network, monkeypatch) -> None:
+        from nemucast import auto_standby
+
+        self.seed_session()
+        monkeypatch.setattr(auto_standby, "AUTO_RESTORE_VOLUME", False)
+        with fake_network(["Dell"]) as net:
+            cast = net["casts"]["Dell"]
+            cast.status.volume_level = 0.42
+            auto_standby.main(["--name", "Dell"])
+        cast.set_volume.assert_called_once_with(0.38)
+        auto_standby.power_off.assert_awaited_once()
+
+    @pytest.mark.parametrize("power", [True, False, "unknown"])
+    def test_cleanup_after_window(self, outside, power, fake_network, monkeypatch) -> None:
+        from nemucast import auto_standby
+        from nemucast.tv_power import TvPowerError
+
+        self.seed_session()
+        if power == "unknown":
+            auto_standby.read_power_state.side_effect = TvPowerError("unknown")
+        else:
+            auto_standby.read_power_state.return_value = power
+        with fake_network(["Dell"]) as net:
+            cast = net["casts"]["Dell"]
+            auto_standby.main(["--name", "Dell"])
+        if power is True:
+            cast.set_volume.assert_called_once_with(0.5)
+        else:
+            cast.set_volume.assert_not_called()
+        auto_standby.power_off.assert_not_called()
+        state = load_state(auto_standby.AUTO_STATE_FILE, "Dell")
+        assert state["original_volume"] == (0.5 if power == "unknown" else None)
+
+    def test_missing_device_cleanup_keeps_session(self, outside, fake_network) -> None:
+        from nemucast import auto_standby
+
+        self.seed_session()
+        with fake_network([]):
+            auto_standby.main(["--name", "Dell"])
+        assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["original_volume"] == 0.5
+        auto_standby.read_power_state.assert_not_called()
+
+    def test_invalid_window_fails_before_network(self, outside, monkeypatch) -> None:
+        from nemucast import auto_standby
+
+        monkeypatch.setattr(auto_standby, "in_night_window", Mock(side_effect=ValueError("bad")))
+        discover = Mock()
+        monkeypatch.setattr(auto_standby, "discover_chromecasts", discover)
+        with pytest.raises(SystemExit) as exc:
+            auto_standby.main(["--name", "Dell"])
+        assert exc.value.code == 1
+        discover.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"consecutive_lowered": "3"},
+        {"consecutive_lowered": True},
+        {"consecutive_lowered": -1},
+        {"original_volume": "0.5"},
+        {"original_volume": float("nan")},
+        {"last_lowered_to": 2.0},
+    ],
+)
+def test_invalid_session_state_is_rebuilt(tmp_path, bad) -> None:
+    path = tmp_path / "state.json"
+    state = fresh_state("Dell")
+    state.update(bad)
+    path.write_text(json.dumps(state))
+    assert load_state(path, "Dell") is None
+
+
+def test_non_utf8_state_is_rebuilt(tmp_path) -> None:
+    path = tmp_path / "state.json"
+    path.write_bytes(b"\xff\xfe")
+    assert load_state(path, "Dell") is None
+
+
+def test_legacy_state_drops_obsolete_flags(tmp_path) -> None:
+    path = tmp_path / "state.json"
+    state = fresh_state("Dell")
+    state.pop("original_volume")
+    state.update(powered_off=True, volume_at_power_off=0.5)
+    save_state(path, state)
+    loaded = load_state(path, "Dell")
+    assert loaded["original_volume"] is None
+    assert "powered_off" not in loaded
+    assert "volume_at_power_off" not in loaded
+
+
+def test_unreadable_power_state_alerts_only_when_session_in_progress(tmp_path, monkeypatch) -> None:
+    """状態不明の失敗通知は、音量を下げ始めた後だけ（夜通しの通知で埋もれない）"""
+    from nemucast import auto_standby as module
+
+    for original_volume, expected_calls in ((None, 0), (0.5, 1)):
+        state = module.fresh_state("Living")
+        state["original_volume"] = original_volume
+        state_file = tmp_path / f"s{expected_calls}.json"
+        monkeypatch.setattr(module, "AUTO_STATE_FILE", state_file)
+        module.save_state(state_file, state)
+        monkeypatch.setattr(module, "AUTO_NIGHT_FORCE", True)
+        browser = type("B", (), {"devices": {"x": 1}, "stop_discovery": lambda self: None})()
+        cast = type("C", (), {"cast_info": type("I", (), {"host": "h"})()})()
+        monkeypatch.setattr(module, "discover_chromecasts", lambda name: (cast, browser))
+        monkeypatch.setattr(module, "update_discovery_alert", lambda **kw: False)
+
+        def boom(*args, **kwargs):
+            raise module.TvPowerError("unreadable")
+
+        monkeypatch.setattr(module, "process_device", boom)
+        calls: list[str] = []
+        monkeypatch.setattr(module, "send_discovery_alert", lambda msg: calls.append(msg))
+        monkeypatch.chdir(tmp_path)
+        import pytest
+
+        with pytest.raises(SystemExit) as exc:
+            module.main(args=["--name", "Living"])
+        assert exc.value.code == 1
+        assert len(calls) == expected_calls
