@@ -194,7 +194,13 @@ def process_device(cast: Any, name: str, state: dict[str, Any], *, cleanup: bool
         return
     cast.wait(timeout=CONNECT_TIMEOUT_SEC)
     if cleanup:
-        restore_volume(cast, state)
+        last_lowered_to = state.get("last_lowered_to")
+        current = get_current_volume(cast)
+        if last_lowered_to is not None and current > last_lowered_to + MANUAL_RISE_THRESHOLD:
+            # 窓の終わり際に手動で上げられた音量を、古い元音量で上書きしない
+            logging.info("手動で音量が上げられているため復元しません: current=%.2f", current)
+        else:
+            restore_volume(cast, state)
         save_state(AUTO_STATE_FILE, fresh_state(name))
         logging.info("tick 結果: cleanup device=%s", name)
         return

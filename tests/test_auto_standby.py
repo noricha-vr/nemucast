@@ -540,6 +540,7 @@ class TestNightMain:
             auto_standby.read_power_state.return_value = power
         with fake_network(["Dell"]) as net:
             cast = net["casts"]["Dell"]
+            cast.status.volume_level = 0.42
             auto_standby.main(["--name", "Dell"])
         if power is True:
             cast.set_volume.assert_called_once_with(0.5)
@@ -548,6 +549,19 @@ class TestNightMain:
         auto_standby.power_off.assert_not_called()
         state = load_state(auto_standby.AUTO_STATE_FILE, "Dell")
         assert state["original_volume"] == (0.5 if power == "unknown" else None)
+
+    def test_cleanup_does_not_overwrite_manual_volume_rise(self, outside, fake_network) -> None:
+        """窓の終わり際に手動で上げられた音量を、古い元音量で上書きしない"""
+        from nemucast import auto_standby
+
+        self.seed_session()
+        auto_standby.read_power_state.return_value = True
+        with fake_network(["Dell"]) as net:
+            cast = net["casts"]["Dell"]
+            cast.status.volume_level = 0.9
+            auto_standby.main(["--name", "Dell"])
+        cast.set_volume.assert_not_called()
+        assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["original_volume"] is None
 
     def test_missing_device_cleanup_keeps_session(self, outside, fake_network) -> None:
         from nemucast import auto_standby
