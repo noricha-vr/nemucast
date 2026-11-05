@@ -95,6 +95,8 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 | `AUTO_NIGHT_END` | 夜間窓の終了（HH:MM、含まない）。`23:00`〜`02:00` のような日付またぎにも対応。同時刻は空の窓 | `05:00` |
 | `AUTO_NIGHT_FORCE` | `1` なら時間帯を無視して動作。昼間の試験用 | `0` |
 | `AUTO_RESTORE_VOLUME` | `1` なら電源 OFF 直前に元の音量へ戻す。時間外の後始末ではこの設定にかかわらず戻す | `1` |
+| `AUTO_RESTORE_WAIT_SEC` | 音量復元後、テレビが反映した値を読み戻して確かめる待ち時間（秒）。`set_volume` は応答を待たず、反映前に電源を切ると翌日の音量が 0 になった（実機）ため、確認してから電源を切る。確認できなくても電源OFFは続行し WARNING を出す | `5` |
+| `AUTO_RESTORE_TOLERANCE` | 読み戻しの許容差 | `0.015` |
 | `AUTO_LOWERED_THRESHOLD` | 電源 OFF までの連続下げ回数 | `3` |
 | `AUTO_MIN_LEVEL` | 下限音量 | `0.05` |
 | `AUTO_STATE_FILE` | 自動制御の state 保存先 | `logs/auto_standby_state.json` |

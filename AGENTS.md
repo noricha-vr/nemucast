@@ -37,6 +37,7 @@ Chromecast の active / idle 判定には依存せず、`前回自動設定し�
 
 - **`quit_app` ではこの機種の電源は切れない**（ホーム画面に戻るだけ。2026-11-05 に実機で確認）。電源OFFは `tv_power`（Android TV Remote v2、`androidtvremote2` 版固定）で POWER を送る。手動の `nemucast`（`volume.py`）は今も `cast_client.standby_device`（= `quit_app`）を使うため、電源は切れない。
 - **POWER はトグル**。`is_on` を読めた時、かつ True の時だけ送る。状態が確定できない時（接続失敗・`is_on` を読めない・MAC 不一致）は絶対に送らない。送信直前にも `is_on` を再確認し、送信後は新規接続で `is_on=False` を読み戻す。`KEYCODE_SLEEP` / `SOFT_SLEEP` はこの機種で無反応。
+- **音量の復元は読み戻しで確認してから電源を切る**。`cast.set_volume` は応答を待たず、復元の直後（約 0.1 秒）に POWER を送ると復元が反映されず、翌日点けた時の音量が 0 になった（2026-11-05 実機）。音量 0.23 のまま電源を切って点け直すと 0.23 が保たれる。
 - 電源が切れていても mDNS・6466・8009 は残る（数分は実測）。「見えない」は「切れている」の根拠にならない。電源は発見結果ではなく `is_on` で判断する。
 - 接続先は Cast の発見結果から毎回得る（IP 固定にしない）。見えない時は同名の前回 IP を使い、ペアリング時に記録したテレビの MAC と照合する。
 - **ペアリング**（初回のみ。PIN はテレビ画面に出るので人の読み取りが要る）: `uv run --frozen nemucast-tv-pair --pin-file <PIN を書くファイル> --need-file <PIN 要求を書くファイル>`。`--need-file` に要求が書かれ、`--pin-file` に PIN が書かれるのを最大 10 分待つ。完了すると証明書・鍵・MAC・IP を保存する。
@@ -102,7 +103,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 
 | コマンド | 用途 | 主な設定 |
 |----------|------|----------|
-| `nemucast-auto` | 15 分間隔で起動し、ローカル時刻 00:30〜05:00 に音量を下げ、点灯中に元音量へ戻してテレビ電源 OFF を確認する | `AUTO_NIGHT_START=00:30`, `AUTO_NIGHT_END=05:00`, `AUTO_NIGHT_FORCE=0`, `AUTO_RESTORE_VOLUME=1`, `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800`, `DISCOVERY_ALERT_COMMAND`（LAN 上 0 台が `DISCOVERY_ALERT_AFTER_TICKS=2` 回続いたら終了コード 2 と通知、回復時も 1 回通知） |
+| `nemucast-auto` | 15 分間隔で起動し、ローカル時刻 00:30〜05:00 に音量を下げ、点灯中に元音量へ戻してテレビ電源 OFF を確認する | `AUTO_NIGHT_START=00:30`, `AUTO_NIGHT_END=05:00`, `AUTO_NIGHT_FORCE=0`, `AUTO_RESTORE_VOLUME=1`, `AUTO_RESTORE_WAIT_SEC=5`, `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800`, `DISCOVERY_ALERT_COMMAND`（LAN 上 0 台が `DISCOVERY_ALERT_AFTER_TICKS=2` 回続いたら終了コード 2 と通知、回復時も 1 回通知） |
 | `nemucast-standby` | 20:00 の即 OFF 用。テレビ本体の電源を切り、読み戻して確認する。音量制御も state も持たない。失敗は exit 1 + `DISCOVERY_ALERT_COMMAND` | `CHROMECAST_NAME`, `TV_CERT_DIR`, `TV_POWER_*` |
 | `nemucast` | 手動デバッグ用。1回の tick 実行または `--run-until-standby` で継続実行 | `INTERVAL_SEC=1200`, `INACTIVE_THRESHOLD=3`, `STATE_FILE=logs/activity_state.json` |
 

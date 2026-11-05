@@ -705,3 +705,43 @@ def test_huge_integer_volume_does_not_crash_load_state(tmp_path) -> None:
     )
     assert module.load_state(state_file, "Living") is None
     del json
+
+
+@pytest.fixture(autouse=True)
+def _no_restore_wait(monkeypatch):
+    from nemucast import auto_standby
+
+    monkeypatch.setattr(auto_standby, "AUTO_RESTORE_WAIT_SEC", 0)
+
+
+def test_restore_volume_waits_until_tv_reports_original(monkeypatch, caplog) -> None:
+    """set_volume は応答を待たない。反映（読み戻し）を確認してから次へ進む"""
+    from types import SimpleNamespace
+
+    from nemucast import auto_standby
+
+    monkeypatch.setattr(auto_standby, "AUTO_RESTORE_WAIT_SEC", 3)
+    monkeypatch.setattr(auto_standby.time, "sleep", lambda s: None)
+    reads = iter([0.11, 0.11, 0.23])
+
+    class FakeStatus:
+        @property
+        def volume_level(self) -> float:
+            return next(reads)
+
+    cast = SimpleNamespace(status=FakeStatus(), set_volume=Mock())
+    with caplog.at_level("INFO"):
+        auto_standby.restore_volume(cast, {"original_volume": 0.23})
+    cast.set_volume.assert_called_once_with(0.23)
+    assert "読み戻しで確認" in caplog.text
+
+
+def test_restore_volume_warns_but_continues_when_not_confirmed(caplog) -> None:
+    from types import SimpleNamespace
+
+    from nemucast import auto_standby
+
+    cast = SimpleNamespace(status=SimpleNamespace(volume_level=0.11), set_volume=Mock())
+    with caplog.at_level("WARNING"):
+        auto_standby.restore_volume(cast, {"original_volume": 0.23})
+    assert "確認できませんでした" in caplog.text
