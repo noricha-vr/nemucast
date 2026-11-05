@@ -168,7 +168,8 @@ class TestStatePersistence:
 
         assert loaded is not None
         assert loaded["consecutive_lowered"] == 0
-        assert loaded["last_lowered_to"] is None
+        # 停止中の手動上昇を次 tick で検出できるよう残す
+        assert loaded["last_lowered_to"] == 0.4
 
     @pytest.mark.parametrize("count", [2, 3])
     def test_stale_state_keeps_original_and_pending_shutdown(
@@ -600,10 +601,8 @@ def test_legacy_state_drops_obsolete_flags(tmp_path) -> None:
     state.pop("original_volume")
     state.update(powered_off=True, volume_at_power_off=0.5)
     save_state(path, state)
-    loaded = load_state(path, "Dell")
-    assert loaded["original_volume"] is None
-    assert "powered_off" not in loaded
-    assert "volume_at_power_off" not in loaded
+    # 旧形式は引き継がず作り直す（フラグだけ捨ててカウントを残すと初回 tick で即 OFF になる）
+    assert load_state(path, "Dell") is None
 
 
 def test_unreadable_power_state_alerts_only_when_session_in_progress(tmp_path, monkeypatch) -> None:
@@ -635,3 +634,60 @@ def test_unreadable_power_state_alerts_only_when_session_in_progress(tmp_path, m
             module.main(args=["--name", "Living"])
         assert exc.value.code == 1
         assert len(calls) == expected_calls
+
+
+def test_legacy_powered_off_state_is_discarded(tmp_path) -> None:
+    """旧形式 state（powered_off）を引き継いで、視聴再開後に初回 tick で即 OFF しない"""
+    import json
+
+    from nemucast import auto_standby as module
+
+    state_file = tmp_path / "s.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "device_name": "Living",
+                "powered_off": True,
+                "consecutive_lowered": 3,
+                "last_lowered_to": 0.1,
+                "updated_at": 0,
+            }
+        )
+    )
+    assert module.load_state(state_file, "Living") is None
+
+
+def test_stale_state_keeps_last_lowered_to_so_manual_rise_is_detected(tmp_path) -> None:
+    import json
+
+    from nemucast import auto_standby as module
+
+    state_file = tmp_path / "s.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "device_name": "Living",
+                "consecutive_lowered": 2,
+                "last_lowered_to": 0.42,
+                "original_volume": 0.5,
+                "updated_at": 0,
+            }
+        )
+    )
+    state = module.load_state(state_file, "Living")
+    assert state["consecutive_lowered"] == 0
+    assert state["last_lowered_to"] == 0.42
+    assert state["original_volume"] == 0.5
+
+
+def test_huge_integer_volume_does_not_crash_load_state(tmp_path) -> None:
+    import json
+
+    from nemucast import auto_standby as module
+
+    state_file = tmp_path / "s.json"
+    state_file.write_text(
+        '{"device_name": "Living", "original_volume": ' + "1" + "0" * 400 + ', "updated_at": 0}'
+    )
+    assert module.load_state(state_file, "Living") is None
+    del json

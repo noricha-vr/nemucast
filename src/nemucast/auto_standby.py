@@ -7,7 +7,6 @@ import asyncio
 import json
 import logging
 import logging.handlers
-import math
 import os
 import shlex
 import subprocess
@@ -17,6 +16,8 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from pychromecast.error import PyChromecastError
 
 from nemucast.cast_client import (
     discover_chromecasts,
@@ -81,9 +82,7 @@ def valid_session_state(data: dict[str, Any]) -> bool:
         return False
     for key in ("original_volume", "last_lowered_to"):
         value = data.get(key)
-        if value is not None and (
-            type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1
-        ):
+        if value is not None and (type(value) not in (int, float) or not 0 <= value <= 1):
             return False
     return True
 
@@ -99,6 +98,11 @@ def load_state(state_file: Path, device_name: str) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict) or data.get("device_name") != device_name:
         return None
+    if "powered_off" in data:
+        # 旧形式（powered_off=True, consecutive_lowered=3 等）を引き継ぐと、視聴再開後でも
+        # 初回 tick で即 OFF になる。新形式の「電源OFF待ち」と区別するため作り直す
+        logging.info("旧形式の state を破棄して作り直します。")
+        return None
     if not valid_session_state(data):
         logging.warning("state のカウントまたは音量が不正なため作り直します。")
         return None
@@ -108,8 +112,8 @@ def load_state(state_file: Path, device_name: str) -> dict[str, Any] | None:
     if is_state_stale(state) and state["consecutive_lowered"] < AUTO_LOWERED_THRESHOLD:
         # 音量復元の責任は時間切れでも消さない。電源OFF待ちも次 tick で再試行する
         logging.info("前回更新から時間が空いたため連続カウントをリセットします。")
+        # last_lowered_to は残す: 停止中に手動で上げられた音量を次 tick で検出するため
         state["consecutive_lowered"] = 0
-        state["last_lowered_to"] = None
     return state
 
 
@@ -216,7 +220,7 @@ def cleanup_session(name: str, state: dict[str, Any]) -> None:
             logging.warning("時間外の音量復元を保留: device=%s が見つかりません", name)
             return
         process_device(cast, name, state, cleanup=True)
-    except (TvPowerError, OSError, RuntimeError) as exc:
+    except (TvPowerError, PyChromecastError, OSError, RuntimeError) as exc:
         logging.warning("時間外の音量復元を保留: %s", exc)
     finally:
         stop_discovery(browser)
@@ -383,7 +387,7 @@ def main(args: list[str] | None = None) -> None:
 
     try:
         process_device(cast, parsed.name, state, cleanup=False)
-    except TvPowerError as exc:
+    except (TvPowerError, PyChromecastError) as exc:
         message = f"nemucast: テレビ '{parsed.name}' の夜間制御に失敗しました: {exc}"
         logging.error(message)
         # 一晩 15 分おきの通知で埋もれないよう、通知は進行中（音量を下げ始めた後）だけ
