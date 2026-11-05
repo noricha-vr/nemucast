@@ -89,3 +89,36 @@ def test_mac_match_proceeds(monkeypatch) -> None:
 
     monkeypatch.setattr(tv_power, "read_mac", same_mac)
     assert asyncio.run(power_off("h", expected_mac="11:22:33:44:55:66")) == "turned_off"
+
+
+def test_never_sends_when_state_flips_off_before_send(monkeypatch) -> None:
+    """読んだ後・送る前にテレビ側が False に変わったら POWER を送らない（点けない）"""
+    real_read = tv_power._read_is_on
+
+    async def read_then_flip(host: str):
+        remote, is_on = await real_read(host)
+        FakeRemote.state = False
+        return remote, is_on
+
+    monkeypatch.setattr(tv_power, "_read_is_on", read_then_flip)
+    assert asyncio.run(power_off("h")) == "already_off"
+    assert FakeRemote.sent == 0
+
+
+def test_never_sends_when_state_cannot_be_read(monkeypatch) -> None:
+    """is_on を確定できない（None のまま）なら POWER を送らずエラーにする"""
+    monkeypatch.setattr(tv_power, "IS_ON_READ_SEC", 1)
+    monkeypatch.setattr(FakeRemote, "is_on", property(lambda self: None))
+    with pytest.raises(TvPowerError):
+        asyncio.run(power_off("h"))
+    assert FakeRemote.sent == 0
+
+
+def test_never_sends_when_connect_fails_midway(monkeypatch) -> None:
+    async def fail(self: FakeRemote) -> None:
+        raise tv_power.ConnectionClosed
+
+    monkeypatch.setattr(FakeRemote, "async_connect", fail)
+    with pytest.raises(TvPowerError):
+        asyncio.run(power_off("h"))
+    assert FakeRemote.sent == 0
