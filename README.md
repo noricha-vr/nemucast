@@ -105,7 +105,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 | `DISCOVERY_ALERT_FILE` | LAN 0 台検知の通知済みフラグ | `logs/discovery_alert_state.json` |
 | `DISCOVERY_ALERT_AFTER_TICKS` | LAN 0 台が連続した時の障害閾値。`0` で無効 | `2` |
 
-`STEP`・`MANUAL_RISE_THRESHOLD`・`CHROMECAST_NAME` は他コマンドと共通です。新しい夜間・テレビ電源の設定はこの README の表と `config.py` を参照してください（`.env.example` には追加していません）。
+`STEP`・`MANUAL_RISE_THRESHOLD`・`CHROMECAST_NAME` は他コマンドと共通です。夜間・テレビ電源の設定は `.env.example` と `config.py` に同じ既定値で載せています。
 
 - 対象 Cast だけが見つからない時は正常終了します。LAN 全体で 0 台が続いた時は ERROR・終了コード 2 とし、障害確定時と回復時に 1 回ずつ通知します。夜間窓の中だけこの検知を行います。
 - launchd 配下では、そのプロセスに macOS の「プライバシーとセキュリティ > ローカルネットワーク」の許可が必要です。
