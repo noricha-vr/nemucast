@@ -136,8 +136,8 @@ state を持つのは `nemucast-auto` と `nemucast`（手動）の 2 つで、�
 
 ## 環境変数
 
-既存の環境変数とデフォルト値は `.env.example` を参照する。夜間制御・テレビ電源で追加した設定は `README.md` の表と `src/nemucast/config.py` が正本（`.env.example` は変更しない）。
-既存設定を追加・削除する場合は `.env.example` と `README.md` の表、および `src/nemucast/config.py` の `os.getenv` デフォルトをセットで更新する。夜間制御・テレビ電源の設定は上記の例外に従い README と config.py のみを同期する。
+全ての環境変数とデフォルト値は `.env.example` を source of truth とする。
+追加・削除する場合は `.env.example` と `README.md` の表、および `src/nemucast/config.py` の `os.getenv` デフォルトをセットで更新する（重複記載の整合性に注意）。
 
 ## コード規約
 
