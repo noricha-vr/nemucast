@@ -26,6 +26,12 @@ DEFAULT_STATE_FILE = os.getenv("STATE_FILE", f"{LOG_DIR}/activity_state.json")
 RUN_UNTIL_STANDBY = os.getenv("RUN_UNTIL_STANDBY", "0") == "1"
 STATE_STALE_INTERVAL_MULTIPLIER = int(os.getenv("STATE_STALE_INTERVAL_MULTIPLIER", "2"))
 
+# ローカル時刻の夜間窓。終了時刻は含めない。FORCE は昼間の動作確認用
+AUTO_NIGHT_START = os.getenv("AUTO_NIGHT_START", "00:30")
+AUTO_NIGHT_END = os.getenv("AUTO_NIGHT_END", "05:00")
+AUTO_NIGHT_FORCE = os.getenv("AUTO_NIGHT_FORCE", "0") == "1"
+AUTO_RESTORE_VOLUME = os.getenv("AUTO_RESTORE_VOLUME", "1") == "1"
+
 # Chromecast を quit_app した後、standby 完了を待つ秒数
 STANDBY_WAIT_SEC = int(os.getenv("STANDBY_WAIT_SEC", "2"))
 

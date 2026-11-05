@@ -126,6 +126,29 @@ async def _wait_off(remote: AndroidTVRemote) -> bool:
     return False
 
 
+async def read_power_state(host: str, expected_mac: str | None) -> bool:
+    """保存済み MAC と照合し、電源状態だけを読む。キーは送らない。
+
+    Raises:
+        TvPowerError: MAC 未登録・不一致、接続不可、電源状態が不明。
+    """
+    if not expected_mac:
+        raise TvPowerError("テレビの MAC が未登録です。nemucast-tv-pair で登録してください")
+    try:
+        actual = await read_mac(host)
+    except ConnectionClosed as exc:
+        raise TvPowerError(f"{host} の機器識別中に切断されました") from exc
+    if actual != expected_mac.lower():
+        raise TvPowerError(f"{host} はペアリングしたテレビではありません (MAC {actual})")
+    remote, is_on = await _read_is_on(host)
+    try:
+        if type(is_on) is not bool:
+            raise TvPowerError(f"{host} の電源状態が不明です")
+        return is_on
+    finally:
+        remote.disconnect()
+
+
 async def power_off(host: str, expected_mac: str | None = None) -> str:
     """テレビの電源を切る。切れたことを新規接続で読み戻して確認する。
 

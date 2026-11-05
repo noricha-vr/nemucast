@@ -1,7 +1,8 @@
 # ねむキャス (Nemucast) 🔊😴
 
-Chromecast / Google TV の音量を自動で下げて、一定時間ユーザー操作がなければ standby にするツールです。  
-Chromecast の active / idle 判定には頼らず、`前回自動設定した音量` と `現在音量` の差分からユーザー活動を判定します。
+Google TV を夜中に見ながら寝落ちした時に、音量を段階的に下げてテレビ本体の電源を切るツールです。
+
+自動制御はローカル時刻の 00:30〜05:00 だけ。手動の音量上昇で待ち時間を数え直し、電源を切る直前に元の音量へ戻します。20:00 に即切るタイマーも併用できます。
 
 ![alt text](images/assets_task_01jy97dj7yey59zsq6vq5zd7dx_1750509022_img_1.webp)
 
@@ -10,7 +11,8 @@ Chromecast の active / idle 判定には頼らず、`前回自動設定した�
 - **活動判定を state で保持**: `last_auto_volume` と `inactive_streak` を JSON に保存します
 - **手動上昇を検出**: 前回の自動設定音量より上がっていれば活動ありとみなします
 - **定期実行にも連続実行にも対応**: 1回だけの tick 実行と、standby まで継続する session 実行の両方をサポートします
-- **cron 用プロファイル付き**: 20:00 用と 00:30 用のコマンドをそのまま使えます
+- **夜間だけ自動制御**: 昼間・夕方の視聴には触れず、夜間は電源状態を確認してから音量を操作します
+- **2 つの運用を同時に動かす**: 20:00 の即 OFF（`nemucast-standby`）と、深夜の段階的 OFF（`nemucast-auto`）。別々の periodic-worker タスクです
 
 ## 📋 必要な環境
 
@@ -74,33 +76,44 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
   - `--name`: 対象デバイス名（デフォルト: `CHROMECAST_NAME` 環境変数 / `Dell`）
 - 想定用途: 「20:00 になったら即切る」のような時刻指定の電源OFF
 
-### 自動寝かしつけ（24h タイマー）
+### 自動寝かしつけ（夜間のみ）
 
-- コマンド: `nemucast-auto`
-- 想定実行: 15 分間隔で常時稼働 (periodic-worker `--every 15m`)
-- 動き:
-  1. 直前 tick で電源OFFしていて、音量上昇または active app がなければ何もしない
-  2. 電源OFF後に音量上昇または active app があれば「視聴再開」と判定し、通常フローに戻す
-  3. 直前 script が下げた音量より上がっていれば「視聴中」と判定し、連続下げカウントを 0 に戻す
-  4. 連続下げカウントが `AUTO_LOWERED_THRESHOLD` (既定 3) 以上なら `quit_app` で電源OFF
-  5. それ以外は音量を `STEP` (既定 -0.04) だけ下げる。`AUTO_MIN_LEVEL` (既定 0.05) 以下なら下げないがカウントは進める
-- 環境変数:
-  - `AUTO_LOWERED_THRESHOLD`: 電源OFFまでの連続下げ回数。既定 `3`
-  - `AUTO_MIN_LEVEL`: 下限音量。既定 `0.05`
-  - `AUTO_STATE_FILE`: state ファイルパス。既定 `logs/auto_standby_state.json`
-  - `AUTO_STATE_STALE_SEC`: これ以上間が空いた state は連続カウントを捨てる秒数。既定 `1800`（15分 x 2）
-  - `DISCOVERY_ALERT_COMMAND`: LAN 上の Chromecast が 1 台も見えない状態に入った時・抜けた時に 1 回ずつ実行する通知コマンド。本文を末尾の引数で渡す。既定は空（通知しない）
-  - `DISCOVERY_ALERT_FILE`: 通知済みかを覚えるフラグファイル。既定 `logs/discovery_alert_state.json`
-  - `DISCOVERY_ALERT_AFTER_TICKS`: LAN 上 0 台が何回続いたら障害とみなすか。既定 `2`（スリープ復帰直後の一瞬の 0 台で誤報しないため）。`0` で判定しない（LAN に対象の Chromecast 1 台だけの家庭向け）。前回の 0 台から `AUTO_STATE_STALE_SEC` 以上空いた時は連続と数えない
-  - `STEP`, `MANUAL_RISE_THRESHOLD`, `CHROMECAST_NAME` は他コマンドと共通
-- 終了コード: デバイスが見つからない場合は「寝かしつける対象がない」とみなして正常終了する（見つからない状態の方が長いため、失敗扱いにするとスケジューラの通知が埋もれる）
-- ただし LAN 上の Chromecast が 1 台も見えない時は環境側の障害（macOS のローカルネットワーク権限が外れた・ネットワーク断）とみなし、ERROR を出して終了コード 2 で終わる（`DISCOVERY_ALERT_AFTER_TICKS` 回続いた時）。目的デバイスが寝ていても他の Chromecast は常時 mDNS に出るため、0 台は通常起きない
-  - periodic-worker など launchd 配下から動かす場合、そのプロセスに「システム設定 > プライバシーとセキュリティ > ローカルネットワーク」の許可が要る。外れると LAN 宛の送信がすべて `No route to host` になる
-- 注意: 活動シグナルは音量変化と active app だけなので、音量に触れずに視聴し続けると時間帯を問わず約 45 分（15 分 x 3）で `quit_app` される
-- state の扱い:
-  - Mac のスリープ等でスケジューラが止まると連続カウントが実態とずれるため、`AUTO_STATE_STALE_SEC` を超えて間が空いた state はカウントを捨てて数え直す（視聴再開直後に電源OFFされるのを防ぐ）
-  - 電源OFF状態だけは時間が空いても維持する（音量上昇 / active app を見るまで何もしない）
-  - state ファイルが壊れていた場合は作り直して続行する（読めない state で毎回落ち続けないため）
+- コマンド: `uv run --frozen nemucast-auto`
+- periodic-worker は従来どおり 15 分間隔で 24 時間起動します。制御する時間はローカル時刻の **00:30 以上、05:00 未満** です。
+- 旧 00:30 プロファイルの「深夜に音量を下げながら待ち、手動で上げたら数え直す」という考え方を引き継ぎました。昼間と 20:00 までの視聴には触りません。20:00 の即時 OFF は別タスクです。
+
+1. 時間外はネットワークに触れず終了します。例外は進行中セッションの後始末だけで、発見・MAC 照合・電源状態の確認後、点灯中なら元の音量に戻し、消灯中なら音量に触れず state を初期化します。確認できなければ警告して次 tick で再試行します。
+2. 夜間は Cast を発見し、保存済み MAC と照合して Android TV Remote の `is_on` を先に読みます。消灯中なら音量にも POWER にも触れず state を初期化します。状態不明・MAC 未登録/不一致・接続不可なら操作せず終了コード 1 と通知です。初回は `nemucast-tv-pair` でペアリングしてください。
+3. 点灯中だけ音量を `STEP` ずつ下げます。最初の音量を `original_volume` に保存します。前回の設定値より手動で音量が上がったら、連続カウントをリセットし、元の音量もその値に更新します。
+4. 下限 `AUTO_MIN_LEVEL` 以下なら音量を変えずカウントだけ進めます。既定では **3 回目の tick で閾値に達し、その tick 内で電源を切ります**（00:30 に開始すれば 00:45、01:00 と進み、01:00 に OFF）。
+5. 切る直前、**テレビがまだ点いている間に** `original_volume` へ音量を戻し、Android TV Remote の `power_off` を実行します。POWER は `is_on=True` の時だけ送り、新規接続で OFF を読み戻します。`quit_app` は使いません。翌日の音量が小さいままになるのを防ぎます。
+6. OFF を確認できたら state を初期化します。失敗時はカウントと元の音量を保持し、`DISCOVERY_ALERT_COMMAND` へ通知して終了コード 1。次 tick は音量復元を手動上昇と誤認せず、電源状態を再確認して OFF を再試行します。
+
+| 環境変数 | 説明 | 既定値 |
+|----------|------|--------|
+| `AUTO_NIGHT_START` | 夜間窓の開始（ローカル時刻 HH:MM、含む） | `00:30` |
+| `AUTO_NIGHT_END` | 夜間窓の終了（HH:MM、含まない）。`23:00`〜`02:00` のような日付またぎにも対応。同時刻は空の窓 | `05:00` |
+| `AUTO_NIGHT_FORCE` | `1` なら時間帯を無視して動作。昼間の試験用 | `0` |
+| `AUTO_RESTORE_VOLUME` | `1` なら電源 OFF 直前に元の音量へ戻す。時間外の後始末ではこの設定にかかわらず戻す | `1` |
+| `AUTO_LOWERED_THRESHOLD` | 電源 OFF までの連続下げ回数 | `3` |
+| `AUTO_MIN_LEVEL` | 下限音量 | `0.05` |
+| `AUTO_STATE_FILE` | 自動制御の state 保存先 | `logs/auto_standby_state.json` |
+| `AUTO_STATE_STALE_SEC` | 間隔が空いた時に連続カウントを捨てる秒数 | `1800` |
+| `DISCOVERY_ALERT_COMMAND` | 通知コマンド。本文を末尾の引数で渡す。空なら通知しない | 空 |
+| `DISCOVERY_ALERT_FILE` | LAN 0 台検知の通知済みフラグ | `logs/discovery_alert_state.json` |
+| `DISCOVERY_ALERT_AFTER_TICKS` | LAN 0 台が連続した時の障害閾値。`0` で無効 | `2` |
+
+`STEP`・`MANUAL_RISE_THRESHOLD`・`CHROMECAST_NAME` は他コマンドと共通です。新しい夜間・テレビ電源の設定はこの README の表と `config.py` を参照してください（`.env.example` には追加していません）。
+
+- 対象 Cast だけが見つからない時は正常終了します。LAN 全体で 0 台が続いた時は ERROR・終了コード 2 とし、障害確定時と回復時に 1 回ずつ通知します。夜間窓の中だけこの検知を行います。
+- launchd 配下では、そのプロセスに macOS の「プライバシーとセキュリティ > ローカルネットワーク」の許可が必要です。
+- 音量に触れず視聴し続ける場合も、夜間窓の中では 3 tick で電源が切れます。テレビが消えていても mDNS に見えることがあります。電源は発見結果ではなく `is_on` で判断します。
+- stale な state は連続カウントを捨てますが、復元用 `original_volume` は保持します。すでに閾値に達した電源 OFF の再試行も保持します。旧 `powered_off` / `volume_at_power_off` は使用しません。壊れた JSON は作り直して続行し、保存は一時ファイルと置き換えで行います。
+
+### 2 つの運用と止め方
+
+- 20:00 の即 OFF = `nemucast-standby`（タスク `nemucast-20`）、深夜の段階的 OFF = `nemucast-auto`（タスク `nemucast-auto`）。2 つは独立で、普段は両方 active のままにします。
+- 片方だけ止めたい時は periodic-worker の status で足ります: `periodic-worker update nemucast-auto --status inactive`（戻す時は `active`）。
 
 ### periodic-worker 登録例
 
@@ -111,7 +124,7 @@ periodic-worker register \
   --cwd /path/to/nemucast \
   --command "/path/to/.venv/bin/nemucast-standby"
 
-# 24h、15分間隔で寝かしつけ
+# 24h、15分間隔で起動（制御は夜間窓の中だけ）
 periodic-worker register \
   --name nemucast-auto --every 15m \
   --cwd /path/to/nemucast \
@@ -122,43 +135,50 @@ periodic-worker register \
 
 ```mermaid
 flowchart TD
-    Start([15分タイマー]) --> Connect[Chromecast 接続]
-    Connect --> CurVol[現在音量を取得]
-    CurVol --> PoweredOff{state.powered_off?}
-    PoweredOff -->|Yes| Risen{current &gt;<br/>volume_at_power_off +<br/>RISE_THRESHOLD?}
-    Risen -->|No| ActiveApp{active app?}
-    ActiveApp -->|No| Skip[何もしない]
-    ActiveApp -->|Yes 視聴再開| Reset1[state を初期化]
-    Risen -->|Yes 視聴再開| Reset1[state を初期化]
-    Reset1 --> ManualCheck
-    PoweredOff -->|No| ManualCheck{current &gt;<br/>last_lowered_to +<br/>RISE_THRESHOLD?}
-    ManualCheck -->|Yes 手動上昇| ResetCount[consecutive_lowered = 0]
-    ManualCheck -->|No| Threshold
-    ResetCount --> Threshold{consecutive_lowered &gt;=<br/>AUTO_LOWERED_THRESHOLD?}
-    Threshold -->|Yes| Standby[quit_app<br/>powered_off=true<br/>volume_at_power_off=current]
-    Threshold -->|No| LowerVol[音量を STEP 分下げる<br/>AUTO_MIN_LEVEL でクリップ<br/>count += 1]
-    LowerVol --> SaveState[state 保存]
-    Standby --> SaveState
-    SaveState --> End([終了])
-    Skip --> End
+    Start([15分タイマー]) --> Night{夜間窓の中または FORCE?}
+    Night -->|No| Session{original_volume がある?}
+    Session -->|No| End([終了])
+    Session -->|Yes| Cleanup[発見・MAC照合・電源確認]
+    Cleanup -->|点灯| RestoreCleanup[元の音量へ復元し state 初期化]
+    Cleanup -->|消灯| Clear[state 初期化]
+    Cleanup -->|不明・見つからない| Defer[警告・state 保持で次回再試行]
+    RestoreCleanup --> End
+    Clear --> End
+    Defer --> End
+    Night -->|Yes| Discover[Cast 発見・LAN 0 台検知]
+    Discover --> Power[MAC照合・電源状態確認]
+    Power -->|消灯| Clear
+    Power -->|不明| Error[ERROR・通知・exit 1]
+    Power -->|点灯| Pending{電源OFFの再試行待ち?}
+    Pending -->|No| Manual{手動音量上昇?}
+    Manual -->|Yes| Reset[カウントをリセット・original_volume 更新]
+    Manual -->|No| Lower
+    Reset --> Lower[初回の音量保存・STEP 分下げる・count 加算]
+    Lower --> Save[state 保存]
+    Save --> Threshold{count が閾値以上?}
+    Threshold -->|No| End
+    Pending -->|Yes| Restore
+    Threshold -->|Yes| Restore[設定が有効なら点灯中に元の音量へ復元]
+    Restore --> Off[Android TV Remote の power_off・読み戻し]
+    Off -->|成功| Clear
+    Off -->|失敗| Fail[state 保持・通知・exit 1]
 ```
-
-「カウントが先 → 下げ判定が後」なので、初期 `consecutive_lowered = 0` から始めて 3 tick 下げ、4 tick 目で電源OFF。15 分間隔なら **下げ始めから約 45 分後に電源OFF** に到達する。
 
 ### コマンド別の対比
 
 | 項目 | `nemucast-standby` | `nemucast-auto` | `nemucast`（手動） |
 |------|--------------------|------------------|--------------------|
-| 想定スケジュール | 時刻指定（例: 20:00） | 15分間隔・24h | 任意のタイミングで手動実行 |
+| 想定スケジュール | 時刻指定（例: 20:00） | 15分間隔で起動・夜間のみ制御 | 任意のタイミングで手動実行 |
 | 音量制御 | しない（テレビ本体の電源を切る） | する | する |
 | state | 持たない | `auto_standby_state.json` | `activity_state.json` |
-| 電源OFF条件 | 即時 | 連続 3 tick 下げ続けた次回 | 連続 N tick 非アクティブ |
+| 電源OFF条件 | 即時 | 連続 3 tick 下げた時点 | 連続 N tick 非アクティブ |
 | 用途 | ハードな時刻カットオフ | 寝落ち検知の自動運転 | デバッグ・手動投入 |
 
 ## 📝 ログと state
 
 - 即時 standby ログ: `logs/standby.log`
-- 自動寝かしつけログ: `logs/auto_standby.log`
+- 自動寝かしつけログ: `logs/auto_standby.log`。`tick 結果: lowered / outside_window / cleanup / already_off / turned_off` と音量復元・カウントを記録します
+- 確認例: `rg "tick 結果:|音量復元:|ERROR" logs/auto_standby.log`。初回の夜間運転後、復元が OFF 確認より前に出ていること、窓の外で `lowered` がないことを確認します
 - 手動実行ログ: `logs/lower_cast_volume.log`
 - state:
   - `nemucast-auto` → `logs/auto_standby_state.json`
