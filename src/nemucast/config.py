@@ -47,3 +47,14 @@ LOG_ROTATION_MAX_BYTES = int(os.getenv("LOG_ROTATION_MAX_BYTES", str(512 * 1024)
 LOG_ROTATION_BACKUP_COUNT = int(os.getenv("LOG_ROTATION_BACKUP_COUNT", "1"))
 
 MAX_HISTORY_ENTRIES = 20
+
+# Android TV Remote v2 (テレビ本体の電源制御) のクライアント証明書・鍵の置き場所。
+# ペアリング結果の秘密鍵なので Git 管理外のホームに 0600 で置く
+TV_CERT_DIR = Path(os.getenv("TV_CERT_DIR", str(Path.home() / ".config" / "nemucast"))).expanduser()
+
+# テレビ電源 OFF の送信キー。KEYCODE_SLEEP / SOFT_SLEEP はこの機種 (AQUOS-4KTVJ26-1) で無反応、
+# POWER が効く（2026-11-05 実機確認）。POWER はトグルなので必ず is_on を見てから送る
+TV_POWER_KEY = os.getenv("TV_POWER_KEY", "POWER")
+# 送信後に is_on=False を待つ秒数と、送信の最大回数（リトライ込み）
+TV_POWER_WAIT_SEC = int(os.getenv("TV_POWER_WAIT_SEC", "10"))
+TV_POWER_MAX_ATTEMPTS = int(os.getenv("TV_POWER_MAX_ATTEMPTS", "3"))

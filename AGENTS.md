@@ -16,7 +16,7 @@ AI エージェント（Claude Code / Codex 等）がこのリポジトリを操
 | Lint / Format | ruff（`select = ["E", "F", "I", "N", "W", "UP"]`, line-length 100） |
 | pre-commit | ruff-check --fix / ruff-format --check |
 | CI | `.github/workflows/ci.yaml`（push/PR で ruff + pytest を実行） |
-| エントリポイント | `nemucast` / `nemucast-standby` / `nemucast-auto` |
+| エントリポイント | `nemucast` / `nemucast-standby` / `nemucast-auto` / `nemucast-tv-pair` |
 
 ## プロジェクト概要
 
@@ -28,7 +28,9 @@ Chromecast の active / idle 判定には依存せず、`前回自動設定し�
 | パス | 役割 |
 |------|------|
 | `src/nemucast/cli.py` | `nemucast`（手動実行）のエントリポイント、argparse、ロギング設定 |
-| `src/nemucast/standby.py` | `nemucast-standby` のエントリポイント。発見 → `quit_app` → 終了だけを行う |
+| `src/nemucast/standby.py` | `nemucast-standby` のエントリポイント。発見 → テレビ本体の電源OFF → 読み戻し確認。失敗は終了コード 1 + 通知 |
+| `src/nemucast/tv_power.py` | Android TV Remote v2 の電源制御（`is_on` を見て POWER → 新規接続で読み戻し）、証明書パス、IP キャッシュ |
+| `src/nemucast/tv_pair.py` | `nemucast-tv-pair`（初回ペアリング。PIN をファイル経由で受け取る） |
 | `src/nemucast/auto_standby.py` | `nemucast-auto` のエントリポイント。1 tick 分の最小ロジック（下げる / 電源OFF / 何もしない） |
 | `src/nemucast/config.py` | 環境変数から読み込む設定定数 |
 | `src/nemucast/cast_client.py` | Chromecast の検索・接続・standby 制御 |
@@ -71,7 +73,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 | コマンド | 用途 | 主な設定 |
 |----------|------|----------|
 | `nemucast-auto` | 常用。periodic-worker から 15 分間隔・24 時間で実行し、音量を下げながら自動で電源OFFにする | `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800`, `DISCOVERY_ALERT_COMMAND`（LAN 上 0 台が `DISCOVERY_ALERT_AFTER_TICKS=2` 回続いたら終了コード 2 と通知、回復時も 1 回通知） |
-| `nemucast-standby` | 20:00 用。発見して `quit_app` するだけ。音量制御も state も持たない | `CHROMECAST_NAME` のみ |
+| `nemucast-standby` | 20:00 用。テレビ本体の電源を切り、読み戻して確認する。音量制御も state も持たない。失敗は exit 1 + `DISCOVERY_ALERT_COMMAND` | `CHROMECAST_NAME`, `TV_CERT_DIR`, `TV_POWER_*` |
 | `nemucast` | 手動デバッグ用。1回の tick 実行または `--run-until-standby` で継続実行 | `INTERVAL_SEC=1200`, `INACTIVE_THRESHOLD=3`, `STATE_FILE=logs/activity_state.json` |
 
 ## state ファイル

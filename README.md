@@ -60,12 +60,15 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 
 ## 🕘 タイマー用プロファイル
 
-### 即時 standby（電源OFF相当）
+### テレビの電源を切る
 
 - コマンド: `nemucast-standby`
 - 動き:
-  - 指定 Chromecast を発見して `quit_app` で即座に standby にします
-  - 音量制御や state ファイルは使わない、最小構成のスクリプトです
+  - Cast の発見結果から IP を得て（mDNS に出ない時は同じ名前で最後に見えた IP）、Android TV Remote v2 でテレビ本体の電源を切ります
+  - POWER キーはトグルなので、`is_on` を読んで点いている時だけ送り、新規接続で `is_on=False` を読み戻して確認します（切れなければ最大 `TV_POWER_MAX_ATTEMPTS` 回）。元から切れていれば何も送らず成功です
+  - 見つからない・接続できない・切れない時は終了コード 1 と `DISCOVERY_ALERT_COMMAND` の通知
+  - 音量は触りません。state ファイルも使いません
+- 初回ペアリング（1 回だけ）: `nemucast-tv-pair --pin-file <PIN を書くファイル> --need-file <PIN 要求を書くファイル>`。テレビに出た PIN を `--pin-file` に書くと完了し、証明書・鍵を `TV_CERT_DIR`（既定 `~/.config/nemucast`、0600）に保存します
 - オプション:
   - `--name`: 対象デバイス名（デフォルト: `CHROMECAST_NAME` 環境変数 / `Dell`）
 - 想定用途: 「20:00 になったら即切る」のような時刻指定の電源OFF
@@ -146,7 +149,7 @@ flowchart TD
 | 項目 | `nemucast-standby` | `nemucast-auto` | `nemucast`（手動） |
 |------|--------------------|------------------|--------------------|
 | 想定スケジュール | 時刻指定（例: 20:00） | 15分間隔・24h | 任意のタイミングで手動実行 |
-| 音量制御 | しない | する | する |
+| 音量制御 | しない（テレビ本体の電源を切る） | する | する |
 | state | 持たない | `auto_standby_state.json` | `activity_state.json` |
 | 電源OFF条件 | 即時 | 連続 3 tick 下げ続けた次回 | 連続 N tick 非アクティブ |
 | 用途 | ハードな時刻カットオフ | 寝落ち検知の自動運転 | デバッグ・手動投入 |

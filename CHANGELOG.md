@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+- `nemucast-standby`: `quit_app`（ホーム画面に戻るだけで電源は切れていなかった）をやめ、Android TV Remote v2 の POWER でテレビ本体の電源を切る。`is_on` を見て点いている時だけ送り、読み戻しで確認する。見つからない・接続できない・切れない時は終了コード 1 と Discord 通知（従来は WARNING のまま成功扱い）
+- ログの「スタンバイモードになりました」は実際に読み戻せた時だけ出す
+
+### Added
+- `nemucast-tv-pair`: テレビとの初回ペアリング。環境変数 `TV_CERT_DIR` / `TV_POWER_KEY` / `TV_POWER_WAIT_SEC` / `TV_POWER_MAX_ATTEMPTS`
+- 依存に `androidtvremote2==0.3.2` を追加
+
 ### Fixed
 - `nemucast-auto`: スリープ等で `AUTO_STATE_STALE_SEC` より間が空いた前回の 0 台は、連続回数に数えないようにした（復帰直後の誤通知を防ぐ）
 - `nemucast-auto`: LAN 上の Chromecast が 1 台も見えない時（macOS のローカルネットワーク権限が外れた等）を、デバイス不在と区別して ERROR・終了コード 2 にした（`DISCOVERY_ALERT_AFTER_TICKS` 回続いた時。0 で無効）。`DISCOVERY_ALERT_COMMAND` を設定すると、この状態に入った時と回復した時に 1 回ずつ通知する
