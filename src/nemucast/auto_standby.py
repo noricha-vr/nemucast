@@ -28,7 +28,9 @@ from nemucast.config import (
     AUTO_NIGHT_END,
     AUTO_NIGHT_FORCE,
     AUTO_NIGHT_START,
+    AUTO_RESTORE_TOLERANCE,
     AUTO_RESTORE_VOLUME,
+    AUTO_RESTORE_WAIT_SEC,
     CHROMECAST_NAME,
     CONNECT_TIMEOUT_SEC,
     DISCOVERY_ALERT_AFTER_TICKS,
@@ -179,9 +181,18 @@ def run_tick(
 def restore_volume(cast: Any, state: dict[str, Any]) -> None:
     """点灯確認済みのテレビをセッション開始時の音量に戻す。"""
     original = state.get("original_volume")
-    if original is not None:
-        cast.set_volume(original)
-        logging.info("音量復元: original_volume=%.2f", original)
+    if original is None:
+        return
+    cast.set_volume(original)
+    deadline = time.monotonic() + AUTO_RESTORE_WAIT_SEC
+    while time.monotonic() < deadline:
+        level = getattr(cast.status, "volume_level", None)
+        if isinstance(level, int | float) and abs(level - original) <= AUTO_RESTORE_TOLERANCE:
+            logging.info("音量復元を読み戻しで確認: original_volume=%.2f", original)
+            return
+        time.sleep(0.2)
+    # 電源を切ることを優先して続行する（切れない方が実害が大きい）。ただし翌日の音量は要確認
+    logging.warning("音量復元を読み戻しで確認できませんでした: original_volume=%.2f", original)
 
 
 def process_device(cast: Any, name: str, state: dict[str, Any], *, cleanup: bool) -> None:

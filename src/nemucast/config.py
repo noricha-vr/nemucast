@@ -31,6 +31,10 @@ AUTO_NIGHT_START = os.getenv("AUTO_NIGHT_START", "00:30")
 AUTO_NIGHT_END = os.getenv("AUTO_NIGHT_END", "05:00")
 AUTO_NIGHT_FORCE = os.getenv("AUTO_NIGHT_FORCE", "0") == "1"
 AUTO_RESTORE_VOLUME = os.getenv("AUTO_RESTORE_VOLUME", "1") == "1"
+# 音量復元後、テレビが反映した値を読み戻して確かめる待ち時間と許容差。set_volume は応答を待たず、
+# 反映前に電源を切ると翌日の音量が 0 になった（2026-11-05 実機）
+AUTO_RESTORE_WAIT_SEC = float(os.getenv("AUTO_RESTORE_WAIT_SEC", "5"))
+AUTO_RESTORE_TOLERANCE = float(os.getenv("AUTO_RESTORE_TOLERANCE", "0.015"))
 
 # Chromecast を quit_app した後、standby 完了を待つ秒数
 STANDBY_WAIT_SEC = int(os.getenv("STANDBY_WAIT_SEC", "2"))
