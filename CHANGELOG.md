@@ -5,7 +5,7 @@
 ### Changed
 - `nemucast-auto`: 対象を リビングルーム から Dell（モニターに挿した Chromecast）に付け替えた（`AUTO_TARGET_NAME`、既定 `Dell`）。機器ごとの役割は、リビングルーム = 20:00 に電源を切る（`nemucast-standby`、`CHROMECAST_NAME`）、Dell = 21:00〜06:00 に 15 分ごとに音量を下げ、下がり切ったら電源を切る、で混ぜない。視聴中の判定は「ペアリング済みの `is_on=True` またはアプリ起動中（`app_id` が空・Backdrop 以外）」にした（モニターの CEC 値 `is_idle` は当てにならない）。どちらも満たさない時だけ `tick 結果: not_watching`、毎 tick `対象機器の生値:` をログに出す
 - `nemucast-auto`: 下がり切った tick の電源 OFF は、ペアリング済み（`nemucast-tv-pair --name Dell`）なら POWER、未ペアリングなら `quit_app` を試して `power_off_unavailable` を警告し、1 日 1 回通知する（`AUTO_POWER_OFF_ALERT_FILE`）
-- Dell は 2026-11-10 にペアリング済み。電源 OFF の実機試験は成功と報告済み（`is_on` が True→False）。再ペアリング時は `nemucast-tv-pair --name Dell --pin-file <PIN ファイル> --need-file <PIN 要求ファイル>` を使う
+- Dell は 2026-11-10 にペアリング済み。電源 OFF は 2026-11-10 22:13 の実機試験で `is_on` が True→False になることを確認済み（CEO も目視で確認）。再ペアリング時は `nemucast-tv-pair --name Dell --pin-file <PIN ファイル> --need-file <PIN 要求ファイル>` を使う
 - `nemucast-auto`: 元の音量への復元をテレビが反映するまで読み戻して確認してから電源を切る（`AUTO_RESTORE_WAIT_SEC` / `AUTO_RESTORE_TOLERANCE`）。反映前に切ると翌日の音量が 0 になった
 - `nemucast-auto`: 既定 21:00〜06:00 に視聴中の機器（ペア済みの点灯またはアプリ起動中）の音量を段階的に下げ、3 回目の tick で元音量へ復元して電源 OFF を試す。ペアリング済みなら Android TV Remote で OFF を読み戻す。時間外は新鮮なセッションを完走し、古い進行中セッションだけ後始末する。失敗時の元音量と電源 OFF 待ちは次回へ保持する
 - `nemucast-standby`: `quit_app`（ホーム画面に戻るだけで電源は切れていなかった）をやめ、Android TV Remote v2 の POWER でテレビ本体の電源を切る。`is_on` を見て点いている時だけ送り、読み戻しで確認する。見つからない・接続できない・切れない時は終了コード 1 と Discord 通知（従来は WARNING のまま成功扱い）

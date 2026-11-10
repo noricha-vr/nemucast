@@ -28,7 +28,7 @@ Chromecast の active / idle 判定には依存せず、`前回自動設定し�
 - リビングルーム（テレビ）= 20:00 に電源を切る、それだけ。`nemucast-standby` / `nemucast-20`、対象は `CHROMECAST_NAME`（運用値 `リビングルーム`）。
 - Dell（モニターの Chromecast）= 21:00〜06:00 に 15 分ごとに音量を下げ、下がり切ったら元音量に戻して電源を切る。`nemucast-auto`、対象は `AUTO_TARGET_NAME`（既定 `Dell`）。
 - この 2 つを混ぜない。夜間窓の処理をリビングルームに向けず、20:00 の処理を Dell に向けない。対象を変える時は CEO に確認する。
-- Dell は 2026-11-10 にペアリング済み。電源 OFF の実機試験は成功と報告済み（`is_on` が True→False）。Android TV Remote の POWER を使う。未ペアリング時は音量を下げ、元音量へ復元して `quit_app` を試すところまで。電源 OFF 不可を WARNING と通知で知らせる。
+- Dell は 2026-11-10 にペアリング済み。電源 OFF は 2026-11-10 22:13 の実機試験で `is_on` が True→False になることを確認済み（CEO も目視で確認）。Android TV Remote の POWER を使う。未ペアリング時は音量を下げ、元音量へ復元して `quit_app` を試すところまで。電源 OFF 不可を WARNING と通知で知らせる。
 - auto はペアリング済みなら `cast.wait` 後、音量・生値ログ・アプリ判定より先に `read_power_state` で MAC を照合する（戻り値の `is_on` を視聴判定にも使い、追加接続はしない）。未ペアリングの機器は名前のみで選び、MAC を照合できない。
 - auto はペアリング済みの `is_on=True`、または `cast.status.app_id` が None・空文字・Backdrop 以外なら視聴中とする。未ペアリングはアプリ起動中だけで判定する。`is_idle`・CEC フラグ・`player_state` は判定に使わず、どちらも満たさない時だけ `not_watching` として元音量があれば復元後に state を初期化する（手動で上げられた音量は保つ）。
 
