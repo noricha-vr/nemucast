@@ -28,7 +28,7 @@ Chromecast の active / idle 判定には依存せず、`前回自動設定し�
 | 運用 | コマンド / タスク | 役割 |
 |------|-------------------|------|
 | 20:00 の即 OFF | `nemucast-standby` / `nemucast-20`（cron `0 20 * * *` Asia/Tokyo） | 音量に触れず、テレビ本体の電源を切る。読み戻しで確認し、失敗は exit 1 + Discord 通知 |
-| 深夜の段階 OFF | `nemucast-auto` / `nemucast-auto`（15 分間隔） | 既定 00:30〜05:00 の窓だけ動く。音量を段階的に下げ、点灯中に元の音量へ戻してから電源を切る。窓の外（昼間・20:00 までの視聴）では音量に触れない |
+| 深夜の段階 OFF | `nemucast-auto` / `nemucast-auto`（15 分間隔） | 既定 21:00〜06:00 の窓内で開始し、新鮮な進行中セッションは窓外でも完走する。音量を段階的に下げ、点灯中に元の音量へ戻してから電源を切る。窓外では新規セッションを開始せず、stale な進行中セッションは音量復元だけ行う |
 
 - 片方だけ止める時は `periodic-worker update <タスク名> --status inactive`（戻す時は `active`）。専用の切替コマンドは作らない。
 - 夜間窓は環境変数で変えられる（`AUTO_NIGHT_START` / `AUTO_NIGHT_END`。昼でも試す時は `AUTO_NIGHT_FORCE=1`）。
@@ -93,7 +93,7 @@ uv run ruff format --check  # CI / pre-commit と同じチェック
 uv run pre-commit run --all-files
 
 # CLI 実行
-uv run --frozen nemucast-auto          # 1 tick 分（夜間窓の中だけ動く。periodic-worker が 15 分間隔で叩く）
+uv run --frozen nemucast-auto          # 1 tick 分（夜間窓内で開始・進行中は完走。periodic-worker が 15 分間隔で叩く）
 uv run --frozen nemucast-standby       # テレビ本体の電源OFF（読み戻し確認。点いていれば本当に消える）
 uv run nemucast               # 手動デバッグ用
 uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
@@ -103,7 +103,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 
 | コマンド | 用途 | 主な設定 |
 |----------|------|----------|
-| `nemucast-auto` | 15 分間隔で起動し、ローカル時刻 00:30〜05:00 に音量を下げ、点灯中に元音量へ戻してテレビ電源 OFF を確認する | `AUTO_NIGHT_START=00:30`, `AUTO_NIGHT_END=05:00`, `AUTO_NIGHT_FORCE=0`, `AUTO_RESTORE_VOLUME=1`, `AUTO_RESTORE_WAIT_SEC=5`, `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800`, `DISCOVERY_ALERT_COMMAND`（LAN 上 0 台が `DISCOVERY_ALERT_AFTER_TICKS=2` 回続いたら終了コード 2 と通知、回復時も 1 回通知） |
+| `nemucast-auto` | 15 分間隔で起動し、ローカル時刻 21:00〜06:00 に音量を下げ、点灯中に元音量へ戻してテレビ電源 OFF を確認する | `AUTO_NIGHT_START=21:00`, `AUTO_NIGHT_END=06:00`, `AUTO_NIGHT_FORCE=0`, `AUTO_RESTORE_VOLUME=1`, `AUTO_RESTORE_WAIT_SEC=5`, `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800`, `DISCOVERY_ALERT_COMMAND`（LAN 上 0 台が `DISCOVERY_ALERT_AFTER_TICKS=2` 回続いたら終了コード 2 と通知、回復時も 1 回通知） |
 | `nemucast-standby` | 20:00 の即 OFF 用。テレビ本体の電源を切り、読み戻して確認する。音量制御も state も持たない。失敗は exit 1 + `DISCOVERY_ALERT_COMMAND` | `CHROMECAST_NAME`, `TV_CERT_DIR`, `TV_POWER_*` |
 | `nemucast` | 手動デバッグ用。1回の tick 実行または `--run-until-standby` で継続実行 | `INTERVAL_SEC=1200`, `INACTIVE_THRESHOLD=3`, `STATE_FILE=logs/activity_state.json` |
 
@@ -133,6 +133,9 @@ state を持つのは `nemucast-auto` と `nemucast`（手動）の 2 つで、�
   - `nemucast-auto`: `AUTO_STATE_STALE_SEC`（既定 1800 秒）を超えたら連続カウントを捨てる。ただし復元用 `original_volume` と、閾値到達後の電源 OFF 再試行は保持する
 - state が壊れて読めない場合は作り直して続行する（毎 tick 例外で落ちて自力復帰できなくなるのを防ぐ）。書き込みは一時ファイル + `os.replace` でアトミックに行う
 - `nemucast-auto` は電源 OFF 成功時・消灯確認時・時間外の後始末完了時に state を初期化する。`nemucast-standby` は state を操作しない
+- 窓外でも `original_volume` があり state が stale でなければ通常制御を続行する。stale なら音量を復元して終了する
+- 目的名不在通知は `AUTO_NOT_FOUND_ALERT_FILE=logs/auto_not_found_alert_state.json` で管理し、窓内の不在が `AUTO_NOT_FOUND_ALERT_AFTER_TICKS=4` 回続いたら一度通知、回復も一度通知する。通知失敗時は次 tick で再送する。LAN 0 台検知とは別管理で、壊れたファイルは初期化する
+- 発見一覧に目的名があるのに接続候補が空の時は `DISCOVERY_RETRY_WAIT_SEC=1` 秒待ち、初回に加えて最大 `DISCOVERY_MAX_RETRIES=3` 回再探索する
 
 ## 環境変数
 

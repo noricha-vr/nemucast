@@ -144,6 +144,13 @@ async def read_power_state(host: str, expected_mac: str | None) -> bool:
     try:
         if type(is_on) is not bool:
             raise TvPowerError(f"{host} の電源状態が不明です")
+        volume_info = getattr(remote, "volume_info", None)
+        logging.info(
+            "電源状態の生値: is_on=%r current_app=%r volume_level=%r",
+            is_on,
+            getattr(remote, "current_app", None),
+            volume_info.get("level") if isinstance(volume_info, dict) else None,
+        )
         return is_on
     finally:
         remote.disconnect()
