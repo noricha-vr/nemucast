@@ -30,6 +30,12 @@ def fake_network() -> Callable[[list[str]], Any]:
         casts: dict[str, Mock] = {}
         for index, name in enumerate(device_names):
             cast = Mock()
+            cast.status.app_id = "AndroidNativeApp"
+            cast.status.display_name = "U-NEXT for TV"
+            cast.is_idle = True
+            cast.status.is_stand_by = True
+            cast.status.is_active_input = False
+            cast.media_controller.status.player_state = "UNKNOWN"
             cast.cast_info.friendly_name = name
             casts[name] = cast
             browser.devices[index] = cast.cast_info

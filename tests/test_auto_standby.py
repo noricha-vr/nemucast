@@ -14,6 +14,8 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from pychromecast import IDLE_APP_ID
+from pychromecast.error import PyChromecastError
 
 from nemucast.auto_standby import (
     TickResult,
@@ -25,11 +27,11 @@ from nemucast.auto_standby import (
 )
 
 
-def make_cast(volume: float) -> Mock:
+def make_cast(volume: float | None) -> Mock:
     cast = Mock()
     cast.status.volume_level = volume
-    cast.status.app_id = None
-    cast.status.display_name = None
+    cast.status.app_id = "AndroidNativeApp"
+    cast.status.display_name = "U-NEXT for TV"
     return cast
 
 
@@ -46,8 +48,9 @@ def isolated_auto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(auto_standby, "AUTO_NOT_FOUND_ALERT_FILE", tmp_path / "missing_alert.json")
     monkeypatch.setattr(auto_standby, "AUTO_NOT_FOUND_ALERT_AFTER_TICKS", 4)
     monkeypatch.setattr(auto_standby, "load_identity", Mock(return_value="aa:bb"))
-    monkeypatch.setattr(auto_standby, "read_power_state", AsyncMock(return_value=True))
+    monkeypatch.setattr(auto_standby, "AUTO_POWER_OFF_ALERT_FILE", tmp_path / "power_alert.json")
     monkeypatch.setattr(auto_standby, "power_off", AsyncMock(return_value="turned_off"))
+    monkeypatch.setattr(auto_standby, "read_power_state", AsyncMock(return_value=True))
 
 
 class TestRunTick:
@@ -121,6 +124,8 @@ def config_defaults(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     from nemucast import config
 
     for key in (
+        "AUTO_TARGET_NAME",
+        "AUTO_POWER_OFF_ALERT_FILE",
         "AUTO_NIGHT_START",
         "AUTO_NIGHT_END",
         "DISCOVERY_MAX_RETRIES",
@@ -135,6 +140,10 @@ def config_defaults(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 def test_new_config_defaults(config_defaults: dict[str, Any]) -> None:
+    assert config_defaults["AUTO_TARGET_NAME"] == "Dell"
+    assert config_defaults["AUTO_POWER_OFF_ALERT_FILE"] == Path(
+        "logs/auto_power_off_alert_state.json"
+    )
     assert config_defaults["AUTO_NIGHT_START"] == "21:00"
     assert config_defaults["AUTO_NIGHT_END"] == "06:00"
     assert config_defaults["DISCOVERY_MAX_RETRIES"] == 3
@@ -478,7 +487,6 @@ class TestNightMain:
         monkeypatch.setattr(auto_standby, "discover_chromecasts", discover)
         auto_standby.main(["--name", "Dell"])
         discover.assert_not_called()
-        auto_standby.read_power_state.assert_not_called()
         auto_standby.power_off.assert_not_called()
 
     def test_force_bypasses_window(self, fake_network, monkeypatch) -> None:
@@ -490,33 +498,32 @@ class TestNightMain:
             net["casts"]["Dell"].status.volume_level = 0.5
             auto_standby.main(["--name", "Dell"])
         window.assert_not_called()
-        auto_standby.read_power_state.assert_awaited_once()
+        net["casts"]["Dell"].set_volume.assert_called_once_with(0.46)
 
-    @pytest.mark.parametrize("power", [False, "unknown"])
-    def test_off_or_unknown_never_changes_volume_or_sends_power(
-        self, power, fake_network, monkeypatch
+    @pytest.mark.parametrize("app_id", [None, "", IDLE_APP_ID])
+    def test_without_power_or_app_never_changes_volume_or_sends_power(
+        self,
+        app_id: str | None,
+        fake_network: Callable[[list[str]], Any],
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         from nemucast import auto_standby
-        from nemucast.tv_power import TvPowerError
 
-        reader = auto_standby.read_power_state
-        reader.return_value = power
-        if power == "unknown":
-            reader.side_effect = TvPowerError("unknown")
-        monkeypatch.setattr(auto_standby, "send_discovery_alert", Mock())
-        with fake_network(["Dell"]) as net:
+        auto_standby.read_power_state.return_value = False
+        with fake_network(["Dell"]) as net, caplog.at_level(logging.INFO):
             cast = net["casts"]["Dell"]
-            if power == "unknown":
-                with pytest.raises(SystemExit) as exc:
-                    auto_standby.main(["--name", "Dell"])
-                assert exc.value.code == 1
-            else:
-                auto_standby.main(["--name", "Dell"])
-                assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["original_volume"] is None
+            cast.status.volume_level = 0.44
+            cast.status.app_id = app_id
+            auto_standby.main(["--name", "Dell"])
+        state = load_state(auto_standby.AUTO_STATE_FILE, "Dell")
+        assert state["original_volume"] is None
+        assert state["consecutive_lowered"] == 0
         cast.set_volume.assert_not_called()
-        cast.wait.assert_not_called()
+        cast.wait.assert_called_once_with(timeout=auto_standby.CONNECT_TIMEOUT_SEC)
         cast.quit_app.assert_not_called()
         auto_standby.power_off.assert_not_called()
+        auto_standby.load_identity.assert_called_once_with("Dell")
+        assert "tick 結果: not_watching device=Dell" in caplog.messages
         net["browser"].stop_discovery.assert_called_once()
 
     @staticmethod
@@ -539,11 +546,11 @@ class TestNightMain:
             cast = net["casts"]["Dell"]
             cast.status.volume_level = 0.42
             calls.attach_mock(cast.set_volume, "volume")
-            calls.attach_mock(auto_standby.read_power_state, "read")
             calls.attach_mock(cast.wait, "wait")
+            calls.attach_mock(auto_standby.read_power_state, "read")
             calls.attach_mock(auto_standby.power_off, "off")
             auto_standby.main(["--name", "Dell"])
-        assert [call[0] for call in calls.mock_calls] == ["read", "wait", "volume", "volume", "off"]
+        assert [call[0] for call in calls.mock_calls] == ["wait", "read", "volume", "volume", "off"]
         assert calls.mock_calls[2].args == (0.38,)
         assert calls.mock_calls[3].args == (0.5,)
         assert auto_standby.power_off.await_args.args == (
@@ -592,34 +599,33 @@ class TestNightMain:
         cast.set_volume.assert_called_once_with(0.38)
         auto_standby.power_off.assert_awaited_once()
 
-    @pytest.mark.parametrize("power", [True, False, "unknown"])
-    def test_cleanup_after_window(self, outside, power, fake_network, monkeypatch) -> None:
+    @pytest.mark.parametrize("watching", [True, False, "unknown"])
+    def test_cleanup_after_window(self, outside, watching, fake_network, monkeypatch) -> None:
         from nemucast import auto_standby
-        from nemucast.tv_power import TvPowerError
 
         self.seed_session(stale=True)
-        if power == "unknown":
-            auto_standby.read_power_state.side_effect = TvPowerError("unknown")
-        else:
-            auto_standby.read_power_state.return_value = power
         with fake_network(["Dell"]) as net:
             cast = net["casts"]["Dell"]
             cast.status.volume_level = 0.42
+            if watching == "unknown":
+                cast.wait.side_effect = PyChromecastError("unavailable")
+            elif not watching:
+                cast.status.app_id = IDLE_APP_ID
             auto_standby.main(["--name", "Dell"])
-        if power is True:
+        if watching != "unknown":
             cast.set_volume.assert_called_once_with(0.5)
         else:
             cast.set_volume.assert_not_called()
+        cast.quit_app.assert_not_called()
         auto_standby.power_off.assert_not_called()
         state = load_state(auto_standby.AUTO_STATE_FILE, "Dell")
-        assert state["original_volume"] == (0.5 if power == "unknown" else None)
+        assert state["original_volume"] == (0.5 if watching == "unknown" else None)
 
     def test_cleanup_does_not_overwrite_manual_volume_rise(self, outside, fake_network) -> None:
         """窓の終わり際に手動で上げられた音量を、古い元音量で上書きしない"""
         from nemucast import auto_standby
 
         self.seed_session(stale=True)
-        auto_standby.read_power_state.return_value = True
         with fake_network(["Dell"]) as net:
             cast = net["casts"]["Dell"]
             cast.status.volume_level = 0.9
@@ -634,7 +640,6 @@ class TestNightMain:
         with fake_network([]):
             auto_standby.main(["--name", "Dell"])
         assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["original_volume"] == 0.5
-        auto_standby.read_power_state.assert_not_called()
 
     def test_invalid_window_fails_before_network(self, outside, monkeypatch) -> None:
         from nemucast import auto_standby
@@ -683,8 +688,8 @@ def test_legacy_state_drops_obsolete_flags(tmp_path) -> None:
     assert load_state(path, "Dell") is None
 
 
-def test_unreadable_power_state_alerts_only_when_session_in_progress(tmp_path, monkeypatch) -> None:
-    """状態不明の失敗通知は、音量を下げ始めた後だけ（夜通しの通知で埋もれない）"""
+def test_control_failure_alerts_only_when_session_in_progress(tmp_path, monkeypatch) -> None:
+    """制御失敗の通知は、音量を下げ始めた後だけ（夜通しの通知で埋もれない）"""
     from nemucast import auto_standby as module
 
     for original_volume, expected_calls in ((None, 0), (0.5, 1)):
@@ -840,7 +845,6 @@ class TestNotFoundAlert:
         assert caplog.messages.count("tick 結果: not_found device=Dell") == 6
         assert not auto_standby.DISCOVERY_ALERT_FILE.exists()
         assert not auto_standby.AUTO_STATE_FILE.exists()
-        auto_standby.read_power_state.assert_not_called()
 
     def test_recovery_once_then_new_outage_can_alert(
         self, notify: Mock, fake_network: Callable[[list[str]], Any]
@@ -1097,3 +1101,601 @@ def test_future_updated_at_session_outside_window_is_cleaned_up_not_continued(
         auto_standby.main(["--name", "Dell"])
     cleanup.assert_called_once()
     auto_standby.power_off.assert_not_awaited()
+
+
+def test_dell_app_lowers_despite_idle_cec_and_logs_raw_values(
+    fake_network: Callable[[list[str]], Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """実機と同じ CEC 値・UNKNOWN 再生状態でも、起動中アプリを根拠に下げる。"""
+    from nemucast import auto_standby
+
+    with fake_network(["Dell"]) as net, caplog.at_level(logging.INFO):
+        cast = net["casts"]["Dell"]
+        cast.status.volume_level = 0.44
+        auto_standby.main(["--name", "Dell"])
+    cast.set_volume.assert_called_once_with(0.40)
+    auto_standby.load_identity.assert_called_once_with("Dell")
+    auto_standby.power_off.assert_not_awaited()
+    assert (
+        caplog.messages.count(
+            "対象機器の生値: device=Dell is_on=True app_id='AndroidNativeApp' "
+            "display_name='U-NEXT for TV' "
+            "is_idle=True is_stand_by=True is_active_input=False volume=0.44"
+        )
+        == 1
+    )
+
+
+def test_missing_cast_status_is_not_watching(
+    fake_network: Callable[[list[str]], Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    from nemucast import auto_standby
+
+    auto_standby.read_power_state.return_value = False
+    with fake_network(["Dell"]) as net, caplog.at_level(logging.INFO):
+        cast = net["casts"]["Dell"]
+        cast.status = None
+        auto_standby.main(["--name", "Dell"])
+    cast.set_volume.assert_not_called()
+    auto_standby.power_off.assert_not_awaited()
+    assert "tick 結果: not_watching device=Dell" in caplog.messages
+    assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["original_volume"] is None
+
+
+@pytest.mark.parametrize("missing_status", [False, True])
+def test_not_watching_keeps_restore_state_when_volume_unavailable(
+    missing_status: bool,
+    fake_network: Callable[[list[str]], Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """元音量があっても現在音量を読めない時は、復元情報を消さず再試行に回す。"""
+    from nemucast import auto_standby
+
+    auto_standby.read_power_state.return_value = False
+    TestNightMain.seed_session()
+    before = auto_standby.AUTO_STATE_FILE.read_bytes()
+    monkeypatch.setattr(auto_standby, "send_discovery_alert", Mock(return_value=True))
+    with fake_network(["Dell"]) as net:
+        cast = net["casts"]["Dell"]
+        cast.status.app_id = None
+        cast.status.volume_level = None
+        if missing_status:
+            cast.status = None
+        with pytest.raises(SystemExit) as exc:
+            auto_standby.main(["--name", "Dell"])
+        assert exc.value.code == 1
+    cast.set_volume.assert_not_called()
+    auto_standby.power_off.assert_not_awaited()
+    assert auto_standby.AUTO_STATE_FILE.read_bytes() == before
+
+
+@pytest.mark.parametrize("app_id", [None, "", IDLE_APP_ID])
+@pytest.mark.parametrize("volume", [0.46, 0.60])
+def test_not_watching_restores_session_unless_manually_raised(
+    app_id: str | None,
+    volume: float,
+    fake_network: Callable[[list[str]], Any],
+) -> None:
+    """再生終了後は元音量に戻して初期化し、手動上昇時は現在の音量を保つ。"""
+    from nemucast import auto_standby
+
+    auto_standby.read_power_state.return_value = False
+    state = fresh_state("Dell")
+    state.update(original_volume=0.50, last_lowered_to=0.46, consecutive_lowered=1)
+    save_state(auto_standby.AUTO_STATE_FILE, state)
+    with fake_network(["Dell"]) as net:
+        cast = net["casts"]["Dell"]
+        cast.status.app_id = app_id
+        cast.status.volume_level = volume
+        auto_standby.main(["--name", "Dell"])
+    if volume == 0.46:
+        cast.set_volume.assert_called_once_with(0.50)
+    else:
+        cast.set_volume.assert_not_called()
+    assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["original_volume"] is None
+    cast.quit_app.assert_not_called()
+    auto_standby.power_off.assert_not_awaited()
+
+
+@pytest.mark.parametrize("cleanup", [False, True])
+@pytest.mark.parametrize("is_on", [False, True])
+def test_paired_identity_checked_before_status_and_volume(
+    cleanup: bool,
+    is_on: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAC 照合は生値・視聴判定・通常/cleanup の音量操作より先に 1 回だけ行う。"""
+    from nemucast import auto_standby
+
+    cast = make_cast(0.46)
+    state = fresh_state("Dell")
+    state.update(original_volume=0.50, last_lowered_to=0.46, consecutive_lowered=1)
+    calls = Mock()
+    auto_standby.read_power_state.return_value = is_on
+    for name, mock in (
+        ("wait", cast.wait),
+        ("identity", auto_standby.load_identity),
+        ("read", auto_standby.read_power_state),
+        ("volume", cast.set_volume),
+    ):
+        calls.attach_mock(mock, name)
+    for name in ("log_device_status", "is_watching"):
+        mock = Mock(wraps=getattr(auto_standby, name))
+        monkeypatch.setattr(auto_standby, name, mock)
+        calls.attach_mock(mock, name)
+    auto_standby.process_device(cast, "Dell", state, cleanup=cleanup)
+    assert [call[0] for call in calls.mock_calls] == [
+        "wait",
+        "identity",
+        "read",
+        "log_device_status",
+        "is_watching",
+        "volume",
+    ]
+    auto_standby.read_power_state.assert_awaited_once_with(cast.cast_info.host, "aa:bb")
+    cast.set_volume.assert_called_once_with(0.50 if cleanup else 0.42)
+
+
+@pytest.mark.parametrize("cleanup", [False, True])
+@pytest.mark.parametrize("reason", ["MAC mismatch", "connection unavailable"])
+def test_identity_failure_preserves_session_without_status_or_volume(
+    cleanup: bool,
+    reason: str,
+    fake_network: Callable[[list[str]], Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """照合エラーは既存ハンドラに渡し、復元情報を残して全機器操作を止める。"""
+    from nemucast import auto_standby
+    from nemucast.tv_power import TvPowerError
+
+    TestNightMain.seed_session(stale=cleanup)
+    before = auto_standby.AUTO_STATE_FILE.read_bytes()
+    monkeypatch.setattr(auto_standby, "AUTO_NIGHT_FORCE", not cleanup)
+    monkeypatch.setattr(auto_standby, "in_night_window", Mock(return_value=not cleanup))
+    status_log = Mock()
+    watching = Mock()
+    monkeypatch.setattr(auto_standby, "log_device_status", status_log)
+    monkeypatch.setattr(auto_standby, "is_watching", watching)
+    monkeypatch.setattr(auto_standby, "send_discovery_alert", Mock(return_value=True))
+    auto_standby.read_power_state.side_effect = TvPowerError(reason)
+    with fake_network(["Dell"]) as net:
+        cast = net["casts"]["Dell"]
+        cast.status.volume_level = 0.42
+        if cleanup:
+            auto_standby.main(["--name", "Dell"])
+        else:
+            with pytest.raises(SystemExit) as exc:
+                auto_standby.main(["--name", "Dell"])
+            assert exc.value.code == 1
+    auto_standby.read_power_state.assert_awaited_once_with(cast.cast_info.host, "aa:bb")
+    status_log.assert_not_called()
+    watching.assert_not_called()
+    cast.set_volume.assert_not_called()
+    cast.quit_app.assert_not_called()
+    auto_standby.power_off.assert_not_awaited()
+    assert auto_standby.AUTO_STATE_FILE.read_bytes() == before
+    net["browser"].stop_discovery.assert_called_once()
+
+
+@pytest.mark.parametrize("cleanup", [False, True])
+def test_unpaired_device_skips_identity_read(cleanup: bool) -> None:
+    from nemucast import auto_standby
+
+    auto_standby.load_identity.return_value = None
+    cast = make_cast(0.46)
+    state = fresh_state("Dell")
+    state.update(original_volume=0.50, last_lowered_to=0.46, consecutive_lowered=1)
+    auto_standby.process_device(cast, "Dell", state, cleanup=cleanup)
+    auto_standby.read_power_state.assert_not_awaited()
+    cast.set_volume.assert_called_once_with(0.50 if cleanup else 0.42)
+
+
+def test_device_status_log_escapes_controls_and_limits_length(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """機器由来の改行・制御文字・長い値を 64 文字以内の 1 行に収める。"""
+    from nemucast import auto_standby
+
+    cast = make_cast(0.46)
+    cast.status.app_id = "app\n\r\t\x00\x1b\u2028" + "a" * 100
+    cast.status.display_name = "title\n\r\t\x00\x1b\u2029" + "b" * 100
+    with caplog.at_level(logging.INFO):
+        auto_standby.log_device_status(cast, "Dell")
+    message = caplog.messages[0]
+    assert len(message.splitlines()) == 1
+    for field, value in (
+        ("app_id", cast.status.app_id),
+        ("display_name", cast.status.display_name),
+    ):
+        logged_value = message.split(f"{field}=", 1)[1].split(" ", 1)[0]
+        assert logged_value == repr(value)[:64]
+        assert len(logged_value) == 64
+        assert "\\n\\r\\t\\x00\\x1b\\u202" in logged_value
+    assert len(caplog.records) == 1
+
+
+@pytest.mark.parametrize(
+    "paired,is_on,app_id,watching",
+    [
+        (True, True, None, True),
+        (True, False, "AndroidNativeApp", True),
+        (True, False, None, False),
+        (False, None, "AndroidNativeApp", True),
+        (False, None, None, False),
+    ],
+)
+def test_process_device_power_or_app_watching(
+    paired: bool,
+    is_on: bool | None,
+    app_id: str | None,
+    watching: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """点灯 OR アプリで制御し、照合時の電源状態を追加接続なしで生値に記録する。"""
+    from nemucast import auto_standby
+
+    auto_standby.load_identity.return_value = "aa:bb" if paired else None
+    auto_standby.read_power_state.return_value = is_on
+    cast = make_cast(0.44)
+    cast.status.app_id = app_id
+    with caplog.at_level(logging.INFO):
+        auto_standby.process_device(cast, "Dell", fresh_state("Dell"), cleanup=False)
+    if watching:
+        cast.set_volume.assert_called_once_with(0.40)
+    else:
+        cast.set_volume.assert_not_called()
+    if paired:
+        auto_standby.read_power_state.assert_awaited_once_with(cast.cast_info.host, "aa:bb")
+    else:
+        auto_standby.read_power_state.assert_not_awaited()
+    raw = [msg for msg in caplog.messages if msg.startswith("対象機器の生値:")]
+    assert len(raw) == 1
+    assert f"is_on={is_on}" in raw[0]
+    outcome = "lowered count=1" if watching else "not_watching device=Dell"
+    assert f"tick 結果: {outcome}" in caplog.messages
+
+
+@pytest.mark.parametrize(
+    "result,before,after,count,original,cleanup,paired,restore",
+    [
+        ("lowered", 0.44, 0.40, 0, None, False, True, True),
+        ("lowered", 0.05, 0.05, 0, None, False, True, True),
+        ("lowered", 0.02, 0.02, 0, None, False, True, True),
+        ("not_watching", 0.44, 0.44, 0, None, False, True, True),
+        ("not_watching", None, None, 0, None, False, True, True),
+        ("not_watching", 0.44, 0.50, 1, 0.50, False, True, True),
+        ("not_watching", 0.60, 0.60, 1, 0.50, False, True, True),
+        ("cleanup", 0.44, 0.50, 1, 0.50, True, True, True),
+        ("cleanup", 0.60, 0.60, 1, 0.50, True, True, True),
+        ("cleanup", 0.44, 0.44, 0, None, True, True, True),
+        ("turned_off", 0.44, 0.50, 2, 0.50, False, True, True),
+        ("already_off", 0.44, 0.50, 2, 0.50, False, True, True),
+        ("turned_off", 0.44, 0.40, 2, 0.50, False, True, False),
+        ("turned_off", 0.50, 0.50, 3, 0.50, False, True, False),
+        ("power_off_unavailable", 0.44, 0.50, 2, 0.50, False, False, True),
+        ("power_off_unavailable", 0.44, 0.40, 2, 0.50, False, False, False),
+    ],
+)
+def test_process_device_tick_summary_each_exit(
+    result: str,
+    before: float | None,
+    after: float | None,
+    count: int,
+    original: float | None,
+    cleanup: bool,
+    paired: bool,
+    restore: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """全正常終了経路で開始音量と最終目標音量を含む要約が正確に 1 行出る。"""
+    from nemucast import auto_standby
+
+    monkeypatch.setattr(auto_standby, "AUTO_RESTORE_WAIT_SEC", 0)
+    monkeypatch.setattr(auto_standby, "AUTO_RESTORE_VOLUME", restore)
+    monkeypatch.setattr(auto_standby, "send_discovery_alert", Mock(return_value=True))
+    auto_standby.load_identity.return_value = "aa:bb" if paired else None
+    auto_standby.read_power_state.return_value = result not in ("not_watching", "already_off")
+    auto_standby.power_off.return_value = result
+    cast = make_cast(before)
+    cast.status.app_id = None if result == "not_watching" else "AndroidNativeApp"
+    state = fresh_state("Dell")
+    state.update(consecutive_lowered=count, original_volume=original, last_lowered_to=0.44)
+    with caplog.at_level(logging.INFO):
+        auto_standby.process_device(cast, "Dell", state, cleanup=cleanup)
+    is_on = auto_standby.read_power_state.return_value if paired else None
+    expected_count = 0 if result in ("not_watching", "cleanup") else min(count + 1, 3)
+    expected_before = "None" if before is None else f"{before:.2f}"
+    expected_after = "None" if after is None else f"{after:.2f}"
+    summaries = [msg for msg in caplog.messages if "tick 要約:" in msg]
+    assert summaries == [
+        f"tick 要約: device=Dell is_on={is_on} app_id={cast.status.app_id!r} "
+        f"volume_before={expected_before} volume_after={expected_after} "
+        f"count={expected_count} result={result}"
+    ]
+    assert len([msg for msg in caplog.messages if msg.startswith("tick 結果:")]) == 1
+    if after != before:
+        assert cast.set_volume.call_args.args == (after,)
+    else:
+        cast.set_volume.assert_not_called()
+
+
+def test_tick_summary_escapes_device_and_app_values(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """長い機器名・アプリ ID の改行と制御文字を escape し 1 tick を 1 行に保つ。"""
+    from nemucast import auto_standby
+
+    name = "Dell\n\r\t\x00\x1b\u2028" + "d" * 100
+    app_id = "app\n\r\t\x00\x1b\u2029" + "a" * 100
+    cast = make_cast(0.44)
+    cast.status.app_id = app_id
+    with caplog.at_level(logging.INFO):
+        auto_standby.process_device(cast, name, fresh_state(name), cleanup=False)
+    summaries = [msg for msg in caplog.messages if "tick 要約:" in msg]
+    assert len(summaries) == 1
+    assert len(summaries[0].splitlines()) == 1
+    assert f"device={repr(name)[1:-1][:64]} is_on=True" in summaries[0]
+    assert f"app_id={repr(app_id)[:64]} volume_before=0.44" in summaries[0]
+
+
+@pytest.mark.parametrize("target", [None, "OtherCast"])
+def test_auto_target_config_and_parser_are_independent_of_chromecast_name(
+    target: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """config の環境変数から実際の parser への接続を検証する。"""
+    from nemucast import auto_standby, config
+
+    monkeypatch.setattr("dotenv.load_dotenv", lambda: None)
+    monkeypatch.setenv("CHROMECAST_NAME", "リビングルーム")
+    monkeypatch.delenv("AUTO_TARGET_NAME", raising=False)
+    if target is not None:
+        monkeypatch.setenv("AUTO_TARGET_NAME", target)
+    values = runpy.run_path(config.__file__)
+    monkeypatch.setattr(config, "CHROMECAST_NAME", values["CHROMECAST_NAME"])
+    monkeypatch.setattr(config, "AUTO_TARGET_NAME", values["AUTO_TARGET_NAME"])
+    module = runpy.run_path(auto_standby.__file__)
+    assert values["AUTO_TARGET_NAME"] == (target or "Dell")
+    assert module["parse_args"]([]).name == (target or "Dell")
+    assert module["parse_args"](["--name", "Explicit"]).name == "Explicit"
+
+
+def test_default_auto_only_touches_dell(
+    monkeypatch: pytest.MonkeyPatch, fake_network: Callable[[list[str]], Any]
+) -> None:
+    from nemucast import auto_standby, config
+
+    monkeypatch.setattr(config, "CHROMECAST_NAME", "リビングルーム")
+    monkeypatch.setattr(auto_standby, "AUTO_TARGET_NAME", "Dell")
+    with fake_network(["リビングルーム", "Dell"]) as net:
+        dell = net["casts"]["Dell"]
+        living = net["casts"]["リビングルーム"]
+        dell.status.volume_level = 0.44
+        auto_standby.main([])
+    dell.set_volume.assert_called_once_with(0.40)
+    living.wait.assert_not_called()
+    living.set_volume.assert_not_called()
+    living.quit_app.assert_not_called()
+    assert net["get_listed"].call_args.kwargs["friendly_names"] == ["Dell"]
+
+
+def test_power_alert_file_uses_configured_log_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nemucast import config
+
+    monkeypatch.setattr("dotenv.load_dotenv", lambda: None)
+    monkeypatch.setenv("LOG_DIR", "custom-logs")
+    monkeypatch.delenv("AUTO_POWER_OFF_ALERT_FILE", raising=False)
+    assert runpy.run_path(config.__file__)["AUTO_POWER_OFF_ALERT_FILE"] == Path(
+        "custom-logs/auto_power_off_alert_state.json"
+    )
+    monkeypatch.setenv("AUTO_POWER_OFF_ALERT_FILE", "custom-alert.json")
+    assert runpy.run_path(config.__file__)["AUTO_POWER_OFF_ALERT_FILE"] == Path("custom-alert.json")
+
+
+class TestUnpairedPowerOff:
+    @pytest.fixture
+    def notify(self, monkeypatch: pytest.MonkeyPatch) -> Mock:
+        from nemucast import auto_standby
+
+        auto_standby.load_identity.return_value = None
+        notify = Mock(return_value=True)
+        monkeypatch.setattr(auto_standby, "send_discovery_alert", notify)
+        return notify
+
+    @staticmethod
+    def complete_session(
+        fake_network: Callable[[list[str]], Any], error: Exception | None = None
+    ) -> Mock:
+        from nemucast import auto_standby
+
+        TestNightMain.seed_session()
+        with fake_network(["Dell"]) as net:
+            cast = net["casts"]["Dell"]
+            cast.status.volume_level = 0.42
+            cast.quit_app.side_effect = error
+            auto_standby.main(["--name", "Dell"])
+        return cast
+
+    def test_restores_then_quits_alerts_and_resets(
+        self,
+        notify: Mock,
+        fake_network: Callable[[list[str]], Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from nemucast import auto_standby
+
+        with caplog.at_level(logging.INFO):
+            cast = self.complete_session(fake_network)
+        actions = [
+            (call[0], call.args)
+            for call in cast.mock_calls
+            if call[0] in ("set_volume", "quit_app")
+        ]
+        assert actions == [("set_volume", (0.38,)), ("set_volume", (0.5,)), ("quit_app", ())]
+        assert auto_standby.load_identity.call_count == 2
+        auto_standby.read_power_state.assert_not_awaited()
+        auto_standby.power_off.assert_not_awaited()
+        notify.assert_called_once()
+        assert "power_off_unavailable device=Dell reason=not_paired" in notify.call_args.args[0]
+        assert "nemucast-tv-pair --name Dell" in notify.call_args.args[0]
+        assert "tick 結果: power_off_unavailable device=Dell" in caplog.messages
+        state = load_state(auto_standby.AUTO_STATE_FILE, "Dell")
+        assert state["original_volume"] is None
+        assert state["consecutive_lowered"] == 0
+        saved = json.loads(auto_standby.AUTO_POWER_OFF_ALERT_FILE.read_text())
+        assert saved["alerted_on"] == datetime.now().date().isoformat()
+
+    def test_same_day_suppressed_next_day_notified(
+        self,
+        notify: Mock,
+        fake_network: Callable[[list[str]], Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nemucast import auto_standby
+
+        clock = Mock()
+        clock.now.return_value = datetime(2026, 11, 10, 23, 0)
+        monkeypatch.setattr(auto_standby, "datetime", clock)
+        for _ in range(2):
+            cast = self.complete_session(fake_network)
+            cast.quit_app.assert_called_once()
+        notify.assert_called_once()
+        clock.now.return_value = datetime(2026, 11, 11, 0, 0)
+        self.complete_session(fake_network)
+        assert notify.call_count == 2
+        assert (
+            json.loads(auto_standby.AUTO_POWER_OFF_ALERT_FILE.read_text())["alerted_on"]
+            == "2026-11-11"
+        )
+
+    def test_failed_notification_not_recorded_and_retried(
+        self, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        from nemucast import auto_standby
+
+        notify.side_effect = [False, True]
+        self.complete_session(fake_network)
+        pending = json.loads(auto_standby.AUTO_POWER_OFF_ALERT_FILE.read_text())
+        assert "alerted_on" not in pending
+        assert pending["pending"] is True
+        assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["consecutive_lowered"] == 0
+        self.complete_session(fake_network)
+        self.complete_session(fake_network)
+        assert notify.call_count == 2
+        assert auto_standby.AUTO_POWER_OFF_ALERT_FILE.exists()
+
+    @pytest.mark.parametrize("outside", [False, True])
+    def test_pairing_cancels_pending_notification(
+        self,
+        outside: bool,
+        notify: Mock,
+        fake_network: Callable[[list[str]], Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """通知失敗後のペアリングで再送待ちを解除し、窓内・窓外とも誤通知しない。"""
+        from nemucast import auto_standby
+
+        notify.return_value = False
+        self.complete_session(fake_network)
+        assert json.loads(auto_standby.AUTO_POWER_OFF_ALERT_FILE.read_text())["pending"] is True
+        notify.reset_mock()
+        auto_standby.load_identity.return_value = "aa:bb"
+        monkeypatch.setattr(auto_standby, "AUTO_NIGHT_FORCE", not outside)
+        monkeypatch.setattr(auto_standby, "in_night_window", Mock(return_value=not outside))
+        with fake_network(["Dell"]) as net:
+            net["casts"]["Dell"].status.app_id = None
+            net["casts"]["Dell"].status.volume_level = 0.44
+            auto_standby.main(["--name", "Dell"])
+        notify.assert_not_called()
+        saved = json.loads(auto_standby.AUTO_POWER_OFF_ALERT_FILE.read_text())
+        assert saved["pending"] is False
+        assert "alerted_on" not in saved
+
+    @pytest.mark.parametrize("outside", [False, True])
+    def test_failed_notification_retries_next_tick_without_new_session(
+        self,
+        outside: bool,
+        notify: Mock,
+        fake_network: Callable[[list[str]], Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """アプリ終了後や窓外でも、次 tick は送信成功日を残して再送を終える。"""
+        from nemucast import auto_standby
+
+        notify.side_effect = [False, True]
+        self.complete_session(fake_network)
+        if outside:
+            monkeypatch.setattr(auto_standby, "AUTO_NIGHT_FORCE", False)
+            monkeypatch.setattr(auto_standby, "in_night_window", Mock(return_value=False))
+        with fake_network(["Dell"]) as net:
+            cast = net["casts"]["Dell"]
+            cast.status.app_id = None
+            cast.status.volume_level = 0.44
+            auto_standby.main(["--name", "Dell"])
+        cast.set_volume.assert_not_called()
+        assert notify.call_count == 2
+        saved = json.loads(auto_standby.AUTO_POWER_OFF_ALERT_FILE.read_text())
+        assert saved["alerted_on"] == datetime.now().date().isoformat()
+        assert saved["pending"] is False
+
+    @pytest.mark.parametrize(
+        "error",
+        [PyChromecastError("quit failed"), OSError("quit failed"), RuntimeError("quit failed")],
+    )
+    def test_quit_failure_still_warns_notifies_and_resets(
+        self,
+        error: Exception,
+        notify: Mock,
+        fake_network: Callable[[list[str]], Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from nemucast import auto_standby
+
+        with caplog.at_level(logging.WARNING):
+            self.complete_session(fake_network, error)
+        assert "アプリ終了に失敗: device=Dell" in caplog.text
+        assert "power_off_unavailable device=Dell reason=not_paired" in caplog.text
+        notify.assert_called_once()
+        assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["original_volume"] is None
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            b"\xff\xfe",
+            "{",
+            "[]",
+            "null",
+            "{}",
+            '{"device_name":"Dell","alerted_on":true}',
+            '{"device_name":"Dell","alerted_on":"2026-11-99"}',
+            '{"device_name":"Dell","alerted_on":"20261110"}',
+            '{"device_name":"Other","alerted_on":"2026-11-10"}',
+        ],
+    )
+    def test_corrupted_alert_state_is_rebuilt(
+        self, content: str | bytes, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        from nemucast import auto_standby
+
+        path = auto_standby.AUTO_POWER_OFF_ALERT_FILE
+        path.write_bytes(content if isinstance(content, bytes) else content.encode())
+        self.complete_session(fake_network)
+        notify.assert_called_once()
+        assert json.loads(path.read_text())["alerted_on"] == datetime.now().date().isoformat()
+
+    def test_alert_state_write_failure_does_not_block_reset(
+        self,
+        notify: Mock,
+        fake_network: Callable[[list[str]], Any],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from nemucast import auto_standby
+
+        # ディレクトリを書き込み先にして I/O エラーを発生させる（実通知はモック）。
+        monkeypatch.setattr(auto_standby, "AUTO_POWER_OFF_ALERT_FILE", Path.cwd())
+        with caplog.at_level(logging.WARNING):
+            self.complete_session(fake_network)
+        notify.assert_called_once()
+        assert "電源 OFF 不可通知 state を更新できませんでした" in caplog.text
+        assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["consecutive_lowered"] == 0

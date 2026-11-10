@@ -1,4 +1,4 @@
-"""夜間だけ音量を段階的に下げ、テレビ本体の電源OFFを確認する。"""
+"""夜間に視聴中の機器の音量を段階的に下げ、ペアリング済みなら電源を切る。"""
 
 from __future__ import annotations
 
@@ -13,11 +13,12 @@ import shlex
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from pychromecast import IDLE_APP_ID
 from pychromecast.error import PyChromecastError
 
 from nemucast.cast_client import (
@@ -31,10 +32,11 @@ from nemucast.config import (
     AUTO_NIGHT_START,
     AUTO_NOT_FOUND_ALERT_AFTER_TICKS,
     AUTO_NOT_FOUND_ALERT_FILE,
+    AUTO_POWER_OFF_ALERT_FILE,
     AUTO_RESTORE_TOLERANCE,
     AUTO_RESTORE_VOLUME,
     AUTO_RESTORE_WAIT_SEC,
-    CHROMECAST_NAME,
+    AUTO_TARGET_NAME,
     CONNECT_TIMEOUT_SEC,
     DISCOVERY_ALERT_AFTER_TICKS,
     DISCOVERY_ALERT_COMMAND,
@@ -55,6 +57,7 @@ AUTO_STATE_STALE_SEC = int(os.getenv("AUTO_STATE_STALE_SEC", "1800"))
 DISCOVERY_ALERT_TIMEOUT_SEC = 60
 # LAN 上のデバイスが 0 台の時の終了コード。デバイス不在（成功扱い）と区別するため非ゼロにする
 EXIT_NO_DEVICE_ON_LAN = 2
+STATUS_LOG_VALUE_MAX_LENGTH = 64
 
 
 class TickResult(Enum):
@@ -161,7 +164,7 @@ def run_tick(
     lowered_threshold: int = AUTO_LOWERED_THRESHOLD,
     rise_threshold: float = MANUAL_RISE_THRESHOLD,
 ) -> tuple[TickResult, dict[str, Any]]:
-    """点灯確認済みのテレビで音量を下げる。電源制御は呼び出し側で行う。"""
+    """視聴中の機器で音量を下げる。電源制御は呼び出し側で行う。"""
     # 前 tick で復元後に電源OFFが失敗した場合、復元音量を手動上昇と誤認しない
     if state.get("consecutive_lowered", 0) >= lowered_threshold:
         return TickResult.STANDBY, state
@@ -190,7 +193,7 @@ def run_tick(
 
 
 def restore_volume(cast: Any, state: dict[str, Any]) -> None:
-    """点灯確認済みのテレビをセッション開始時の音量に戻す。"""
+    """機器をセッション開始時の音量に戻し、読み戻しで確認する。"""
     original = state.get("original_volume")
     if original is None:
         return
@@ -206,37 +209,132 @@ def restore_volume(cast: Any, state: dict[str, Any]) -> None:
     logging.warning("音量復元を読み戻しで確認できませんでした: original_volume=%.2f", original)
 
 
-def process_device(cast: Any, name: str, state: dict[str, Any], *, cleanup: bool) -> None:
-    """電源状態を先に確認し、点灯中だけ音量操作と電源OFFを行う。"""
-    host = cast.cast_info.host
+def restore_session_volume(cast: Any, state: dict[str, Any]) -> float | None:
+    """手動の音量上昇を尊重して後始末し、終了時の目標音量を返す。"""
+    current = getattr(cast.status, "volume_level", None)
+    if state.get("original_volume") is None:
+        return current
+    if current is None:
+        raise PyChromecastError("音量復元に必要な機器状態を取得できませんでした")
+    last_lowered_to = state.get("last_lowered_to")
+    current = get_current_volume(cast)
+    if last_lowered_to is not None and current > last_lowered_to + MANUAL_RISE_THRESHOLD:
+        logging.info("手動で音量が上げられているため復元しません: current=%.2f", current)
+        return current
+    restore_volume(cast, state)
+    return state["original_volume"]
+
+
+def is_watching(cast: Any, is_on: bool | None = None) -> bool:
+    """MAC 照合済みの点灯、または Backdrop 以外のアプリ起動を視聴中とする。"""
+    status = cast.status
+    return is_on is True or (status is not None and status.app_id not in (None, "", IDLE_APP_ID))
+
+
+def status_log_value(value: Any, *, quoted: bool = True) -> str:
+    """制御文字を escape し、ログに出す値の長さを制限する。"""
+    escaped = repr(value)
+    if isinstance(value, str) and not quoted:
+        escaped = escaped[1:-1]
+    return escaped[:STATUS_LOG_VALUE_MAX_LENGTH]
+
+
+def log_device_status(cast: Any, name: str, is_on: bool | None = None) -> None:
+    """視聴判定に使う生値と、判定に使わない CEC 値を 1 行で記録する。"""
+    status = cast.status
+    logging.info(
+        "対象機器の生値: device=%s is_on=%s app_id=%s display_name=%s is_idle=%s "
+        "is_stand_by=%s is_active_input=%s volume=%s",
+        status_log_value(name, quoted=False),
+        is_on,
+        status_log_value(getattr(status, "app_id", None)),
+        status_log_value(getattr(status, "display_name", None)),
+        cast.is_idle,
+        getattr(status, "is_stand_by", None),
+        getattr(status, "is_active_input", None),
+        getattr(status, "volume_level", None),
+    )
+
+
+def log_tick_summary(
+    name: str,
+    is_on: bool | None,
+    app_id: str | None,
+    volume_before: float | None,
+    volume_after: float | None,
+    count: int,
+    result: str,
+) -> None:
+    """判定時の生値と終了時の目標音量を、tick ごとに 1 行で記録する。"""
+    logging.info(
+        "tick 要約: device=%s is_on=%s app_id=%s volume_before=%s "
+        "volume_after=%s count=%d result=%s",
+        status_log_value(name, quoted=False),
+        is_on,
+        status_log_value(app_id),
+        "None" if volume_before is None else f"{volume_before:.2f}",
+        "None" if volume_after is None else f"{volume_after:.2f}",
+        count,
+        result,
+    )
+
+
+def finish_session(cast: Any, name: str) -> str:
+    """ペアリング済みなら電源 OFF、未ペアリングならアプリ終了と日次通知を試す。"""
     expected_mac = load_identity(name)
-    if not asyncio.run(read_power_state(host, expected_mac)):
-        save_state(AUTO_STATE_FILE, fresh_state(name))
-        logging.info("tick 結果: already_off device=%s", name)
-        return
+    if expected_mac is not None:
+        return asyncio.run(power_off(cast.cast_info.host, expected_mac))
+    try:
+        cast.quit_app()
+    except Exception as exc:
+        # 未ペアリング時の best effort。アプリ終了の失敗でも通知と state 初期化を行う
+        logging.warning("アプリ終了に失敗: device=%s error=%s", name, exc)
+    message = (
+        f"power_off_unavailable device={name} reason=not_paired"
+        f"（nemucast-tv-pair --name {name} でペアリングすると電源を切れます）"
+    )
+    logging.warning(message)
+    notify_power_off_unavailable(name, message)
+    return "power_off_unavailable"
+
+
+def process_device(cast: Any, name: str, state: dict[str, Any], *, cleanup: bool) -> None:
+    """ペアリング済みなら機器照合後に制御し、終了時は音量を復元する。"""
     cast.wait(timeout=CONNECT_TIMEOUT_SEC)
-    if cleanup:
-        last_lowered_to = state.get("last_lowered_to")
-        current = get_current_volume(cast)
-        if last_lowered_to is not None and current > last_lowered_to + MANUAL_RISE_THRESHOLD:
-            # 窓の終わり際に手動で上げられた音量を、古い元音量で上書きしない
-            logging.info("手動で音量が上げられているため復元しません: current=%.2f", current)
-        else:
-            restore_volume(cast, state)
+    expected_mac = load_identity(name)
+    is_on = None
+    if expected_mac is not None:
+        is_on = asyncio.run(read_power_state(cast.cast_info.host, expected_mac))
+    log_device_status(cast, name, is_on)
+    volume_before = getattr(cast.status, "volume_level", None)
+    app_id = getattr(cast.status, "app_id", None)
+    watching = is_watching(cast, is_on)
+    if not watching or cleanup:
+        volume_after = restore_session_volume(cast, state)
         save_state(AUTO_STATE_FILE, fresh_state(name))
-        logging.info("tick 結果: cleanup device=%s", name)
+        outcome = "cleanup" if watching else "not_watching"
+        logging.info("tick 結果: %s device=%s", outcome, name)
+        log_tick_summary(name, is_on, app_id, volume_before, volume_after, 0, outcome)
         return
+    pending = state.get("consecutive_lowered", 0) >= AUTO_LOWERED_THRESHOLD
     result, state = run_tick(cast, state)
+    volume_after = volume_before if pending else state["last_lowered_to"]
     # 復元・電源OFF前に保存し、失敗や中断時も original_volume とカウントを残す
     save_state(AUTO_STATE_FILE, state)
     if result is TickResult.STANDBY:
         if AUTO_RESTORE_VOLUME:
             restore_volume(cast, state)
-        outcome = asyncio.run(power_off(host, expected_mac))
+            if state.get("original_volume") is not None:
+                volume_after = state["original_volume"]
+        outcome = finish_session(cast, name)
         save_state(AUTO_STATE_FILE, fresh_state(name))
         logging.info("tick 結果: %s device=%s", outcome, name)
-        return
-    logging.info("tick 結果: %s count=%d", result.value, state["consecutive_lowered"])
+    else:
+        outcome = result.value
+        logging.info("tick 結果: %s count=%d", result.value, state["consecutive_lowered"])
+    log_tick_summary(
+        name, is_on, app_id, volume_before, volume_after, state["consecutive_lowered"], outcome
+    )
 
 
 def cleanup_session(name: str, state: dict[str, Any]) -> None:
@@ -278,8 +376,8 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         description=("15分間隔で Chromecast の音量を下げ、3 回連続で下げ続けたら電源OFF にする")
     )
     parser.add_argument(
-        "-n", "--name", type=str, default=CHROMECAST_NAME,
-        help=f"対象 Chromecast 名。デフォルト: {CHROMECAST_NAME}",
+        "-n", "--name", type=str, default=AUTO_TARGET_NAME,
+        help=f"対象 Chromecast 名。デフォルト: {AUTO_TARGET_NAME}",
     )  # fmt: skip
     return parser.parse_args(args)
 
@@ -305,6 +403,64 @@ def send_discovery_alert(message: str, command: str | None = None) -> bool:
         logging.warning("通知コマンドを実行できませんでした: %s", exc)
         return False
     return True
+
+
+def load_power_off_alert(alert_file: Path, name: str) -> str | None:
+    """未ペアリング通知の送信日を読む。破損・対象変更時は未通知として扱う。"""
+    try:
+        data = json.loads(alert_file.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("device_name") != name:
+            return None
+        alerted_on = data.get("alerted_on")
+        if (
+            not isinstance(alerted_on, str)
+            or date.fromisoformat(alerted_on).isoformat() != alerted_on
+        ):
+            return None
+        return alerted_on
+    except (OSError, ValueError):
+        return None
+
+
+def notify_power_off_unavailable(name: str, message: str) -> None:
+    """同日の通知成功後だけ抑制する。通知・保存の失敗で本体を止めない。"""
+    today = datetime.now().date().isoformat()
+    if load_power_off_alert(AUTO_POWER_OFF_ALERT_FILE, name) == today:
+        return
+    delivered = send_discovery_alert(message)
+    alert = {"device_name": name, "pending": not delivered}
+    if delivered:
+        alert["alerted_on"] = today
+    try:
+        save_state(AUTO_POWER_OFF_ALERT_FILE, alert)
+    except OSError as exc:
+        logging.warning("電源 OFF 不可通知 state を更新できませんでした: %s", exc)
+
+
+def retry_power_off_alert(name: str) -> None:
+    """セッション初期化後も前 tick で届かなかった通知だけを再送する。"""
+    try:
+        alert = json.loads(AUTO_POWER_OFF_ALERT_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if (
+        not isinstance(alert, dict)
+        or alert.get("device_name") != name
+        or alert.get("pending") is not True
+    ):
+        return
+    if load_identity(name) is not None:
+        alert["pending"] = False
+        try:
+            save_state(AUTO_POWER_OFF_ALERT_FILE, alert)
+        except OSError as exc:
+            logging.warning("電源 OFF 不可通知 state を更新できませんでした: %s", exc)
+        return
+    notify_power_off_unavailable(
+        name,
+        f"power_off_unavailable device={name} reason=not_paired"
+        f"（nemucast-tv-pair --name {name} でペアリングすると電源を切れます）",
+    )
 
 
 def load_discovery_alert(alert_file: Path) -> dict[str, Any]:
@@ -416,6 +572,7 @@ def main(args: list[str] | None = None) -> None:
     setup_logging()
 
     state = load_state(AUTO_STATE_FILE, parsed.name) or fresh_state(parsed.name)
+    retry_power_off_alert(parsed.name)
     try:
         night = AUTO_NIGHT_FORCE or in_night_window(
             datetime.now(), AUTO_NIGHT_START, AUTO_NIGHT_END
