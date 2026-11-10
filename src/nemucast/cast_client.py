@@ -8,7 +8,7 @@ import time
 import pychromecast
 import zeroconf
 
-from nemucast.config import STANDBY_WAIT_SEC
+from nemucast.config import DISCOVERY_MAX_RETRIES, DISCOVERY_RETRY_WAIT_SEC, STANDBY_WAIT_SEC
 
 
 def create_zeroconf() -> zeroconf.Zeroconf:
@@ -38,21 +38,29 @@ def discover_chromecasts(
     # get_chromecasts() は blocking パスで zeroconf_instance を捨てる（pychromecast 14.0.7）ため
     # 使わない。get_listed_chromecasts なら自前の zeroconf が効き、目的デバイスを見つけた時点で
     # 探索を打ち切るので、無関係なデバイスへの接続も待ち時間も発生しない。
-    chromecasts, browser = pychromecast.get_listed_chromecasts(
-        friendly_names=[target_name],
-        zeroconf_instance=create_zeroconf(),
-    )
-
-    if not chromecasts:
-        logging.error(
-            "目的の Chromecast '%s' が見つかりませんでした。発見したデバイス: %s",
-            target_name,
-            [device.friendly_name for device in browser.devices.values()],
+    max_retries = max(0, DISCOVERY_MAX_RETRIES)
+    for attempt in range(max_retries + 1):
+        chromecasts, browser = pychromecast.get_listed_chromecasts(
+            friendly_names=[target_name],
+            zeroconf_instance=create_zeroconf(),
         )
-        return None, browser
-
-    logging.info("キャスト名: %s", chromecasts[0].cast_info.friendly_name)
-    return chromecasts[0], browser
+        if chromecasts:
+            logging.info("キャスト名: %s", chromecasts[0].cast_info.friendly_name)
+            return chromecasts[0], browser
+        names = [device.friendly_name for device in list(browser.devices.values())]
+        if target_name not in names or attempt >= max_retries:
+            logging.error(
+                "目的の Chromecast '%s' が見つかりませんでした。発見したデバイス: %s",
+                target_name,
+                names,
+            )
+            return None, browser
+        logging.info(
+            "目的名は発見済みのため探索を再試行: device=%s retry=%d", target_name, attempt + 1
+        )
+        # 各 browser が所有する zeroconf も閉じ、最後の browser だけを呼び出し側へ返す
+        stop_discovery(browser)
+        time.sleep(max(0, DISCOVERY_RETRY_WAIT_SEC))
 
 
 def stop_discovery(

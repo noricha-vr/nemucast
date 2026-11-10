@@ -27,8 +27,8 @@ RUN_UNTIL_STANDBY = os.getenv("RUN_UNTIL_STANDBY", "0") == "1"
 STATE_STALE_INTERVAL_MULTIPLIER = int(os.getenv("STATE_STALE_INTERVAL_MULTIPLIER", "2"))
 
 # ローカル時刻の夜間窓。終了時刻は含めない。FORCE は昼間の動作確認用
-AUTO_NIGHT_START = os.getenv("AUTO_NIGHT_START", "00:30")
-AUTO_NIGHT_END = os.getenv("AUTO_NIGHT_END", "05:00")
+AUTO_NIGHT_START = os.getenv("AUTO_NIGHT_START", "21:00")
+AUTO_NIGHT_END = os.getenv("AUTO_NIGHT_END", "06:00")
 AUTO_NIGHT_FORCE = os.getenv("AUTO_NIGHT_FORCE", "0") == "1"
 AUTO_RESTORE_VOLUME = os.getenv("AUTO_RESTORE_VOLUME", "1") == "1"
 # 音量復元後、テレビが反映した値を読み戻して確かめる待ち時間と許容差。set_volume は応答を待たず、
@@ -51,6 +51,16 @@ DISCOVERY_ALERT_FILE = Path(
 # LAN 上 0 台が何 tick 続いたら障害とみなすか（スリープ復帰直後の一瞬の 0 台で誤報しないため）。
 # 0 なら判定しない（対象の Chromecast が LAN に 1 台しかない家庭向け）
 DISCOVERY_ALERT_AFTER_TICKS = int(os.getenv("DISCOVERY_ALERT_AFTER_TICKS", "2"))
+
+# 発見一覧には目的名があるのに接続候補が空だった時の追加探索回数と待ち秒数
+DISCOVERY_MAX_RETRIES = int(os.getenv("DISCOVERY_MAX_RETRIES", "3"))
+DISCOVERY_RETRY_WAIT_SEC = float(os.getenv("DISCOVERY_RETRY_WAIT_SEC", "1"))
+
+# 夜間窓内の目的デバイス不在を、LAN 全体の 0 台検知とは別に記録する
+AUTO_NOT_FOUND_ALERT_AFTER_TICKS = int(os.getenv("AUTO_NOT_FOUND_ALERT_AFTER_TICKS", "4"))
+AUTO_NOT_FOUND_ALERT_FILE = Path(
+    os.getenv("AUTO_NOT_FOUND_ALERT_FILE", f"{LOG_DIR}/auto_not_found_alert_state.json")
+)
 
 # ログファイルのローテーション設定
 LOG_ROTATION_MAX_BYTES = int(os.getenv("LOG_ROTATION_MAX_BYTES", str(512 * 1024)))

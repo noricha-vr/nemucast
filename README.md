@@ -2,7 +2,7 @@
 
 Google TV を夜中に見ながら寝落ちした時に、音量を段階的に下げてテレビ本体の電源を切るツールです。
 
-自動制御はローカル時刻の 00:30〜05:00 だけ。手動の音量上昇で待ち時間を数え直し、電源を切る直前に元の音量へ戻します。20:00 に即切るタイマーも併用できます。
+自動制御はローカル時刻の 21:00〜06:00 に開始し、新鮮な進行中セッションは窓外でも完走します。手動の音量上昇で待ち時間を数え直し、電源を切る直前に元の音量へ戻します。20:00 に即切るタイマーも併用できます。
 
 ![alt text](images/assets_task_01jy97dj7yey59zsq6vq5zd7dx_1750509022_img_1.webp)
 
@@ -11,7 +11,7 @@ Google TV を夜中に見ながら寝落ちした時に、音量を段階的に�
 - **活動判定を state で保持**: `last_auto_volume` と `inactive_streak` を JSON に保存します
 - **手動上昇を検出**: 前回の自動設定音量より上がっていれば活動ありとみなします
 - **定期実行にも連続実行にも対応**: 1回だけの tick 実行と、standby まで継続する session 実行の両方をサポートします
-- **夜間だけ自動制御**: 昼間・夕方の視聴には触れず、夜間は電源状態を確認してから音量を操作します
+- **夜間に開始する自動制御**: 電源状態を確認してから音量を操作し、新鮮な進行中セッションは窓外でも完走します
 - **2 つの運用を同時に動かす**: 20:00 の即 OFF（`nemucast-standby`）と、深夜の段階的 OFF（`nemucast-auto`）。別々の periodic-worker タスクです
 
 ## 📋 必要な環境
@@ -79,20 +79,20 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 ### 自動寝かしつけ（夜間のみ）
 
 - コマンド: `uv run --frozen nemucast-auto`
-- periodic-worker は従来どおり 15 分間隔で 24 時間起動します。制御する時間はローカル時刻の **00:30 以上、05:00 未満** です。
-- 旧 00:30 プロファイルの「深夜に音量を下げながら待ち、手動で上げたら数え直す」という考え方を引き継ぎました。昼間と 20:00 までの視聴には触りません。20:00 の即時 OFF は別タスクです。
+- periodic-worker は従来どおり 15 分間隔で 24 時間起動します。自動制御を開始する時間はローカル時刻の **21:00 以上、06:00 未満** です。
+- 従来の深夜プロファイルの「深夜に音量を下げながら待ち、手動で上げたら数え直す」という考え方を引き継ぎました。時間外に新しいセッションは開始しません。20:00 の即時 OFF は別タスクです。
 
-1. 時間外はネットワークに触れず終了します。例外は進行中セッションの後始末だけで、発見・MAC 照合・電源状態の確認後、点灯中なら元の音量に戻し、消灯中なら音量に触れず state を初期化します。確認できなければ警告して次 tick で再試行します。
+1. 時間外は新しいセッションを開始しません。`original_volume` があり、最終更新から `AUTO_STATE_STALE_SEC` 以内なら通常どおり下げ・復元・電源 OFF まで続行します。stale なセッションは発見・MAC 照合・電源状態の確認後、点灯中なら音量を戻して終了し、消灯中なら音量に触れず state を初期化します。確認できなければ警告して次 tick で再試行します。
 2. 夜間は Cast を発見し、保存済み MAC と照合して Android TV Remote の `is_on` を先に読みます。消灯中なら音量にも POWER にも触れず state を初期化します。状態不明・MAC 未登録/不一致・接続不可なら操作せず終了コード 1 と通知です。初回は `nemucast-tv-pair` でペアリングしてください。
 3. 点灯中だけ音量を `STEP` ずつ下げます。最初の音量を `original_volume` に保存します。前回の設定値より手動で音量が上がったら、連続カウントをリセットし、元の音量もその値に更新します。
-4. 下限 `AUTO_MIN_LEVEL` 以下なら音量を変えずカウントだけ進めます。既定では **3 回目の tick で閾値に達し、その tick 内で電源を切ります**（00:30 に開始すれば 00:45、01:00 と進み、01:00 に OFF）。
+4. 下限 `AUTO_MIN_LEVEL` 以下なら音量を変えずカウントだけ進めます。既定では **3 回目の tick で閾値に達し、その tick 内で電源を切ります**（21:00 に開始すれば 21:15、21:30 と進み、21:30 に OFF）。
 5. 切る直前、**テレビがまだ点いている間に** `original_volume` へ音量を戻し、Android TV Remote の `power_off` を実行します。POWER は `is_on=True` の時だけ送り、新規接続で OFF を読み戻します。`quit_app` は使いません。翌日の音量が小さいままになるのを防ぎます。
 6. OFF を確認できたら state を初期化します。失敗時はカウントと元の音量を保持し、`DISCOVERY_ALERT_COMMAND` へ通知して終了コード 1。次 tick は音量復元を手動上昇と誤認せず、電源状態を再確認して OFF を再試行します。
 
 | 環境変数 | 説明 | 既定値 |
 |----------|------|--------|
-| `AUTO_NIGHT_START` | 夜間窓の開始（ローカル時刻 HH:MM、含む） | `00:30` |
-| `AUTO_NIGHT_END` | 夜間窓の終了（HH:MM、含まない）。`23:00`〜`02:00` のような日付またぎにも対応。同時刻は空の窓 | `05:00` |
+| `AUTO_NIGHT_START` | 夜間窓の開始（ローカル時刻 HH:MM、含む） | `21:00` |
+| `AUTO_NIGHT_END` | 夜間窓の終了（HH:MM、含まない）。`23:00`〜`02:00` のような日付またぎにも対応。同時刻は空の窓 | `06:00` |
 | `AUTO_NIGHT_FORCE` | `1` なら時間帯を無視して動作。昼間の試験用 | `0` |
 | `AUTO_RESTORE_VOLUME` | `1` なら電源 OFF 直前に元の音量へ戻す。時間外の後始末ではこの設定にかかわらず戻す | `1` |
 | `AUTO_RESTORE_WAIT_SEC` | 音量復元後、テレビが反映した値を読み戻して確かめる待ち時間（秒）。`set_volume` は応答を待たず、反映前に電源を切ると翌日の音量が 0 になった（実機）ため、確認してから電源を切る。確認できなくても電源OFFは続行し WARNING を出す | `5` |
@@ -104,10 +104,14 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 | `DISCOVERY_ALERT_COMMAND` | 通知コマンド。本文を末尾の引数で渡す。空なら通知しない | 空 |
 | `DISCOVERY_ALERT_FILE` | LAN 0 台検知の通知済みフラグ | `logs/discovery_alert_state.json` |
 | `DISCOVERY_ALERT_AFTER_TICKS` | LAN 0 台が連続した時の障害閾値。`0` で無効 | `2` |
+| `DISCOVERY_MAX_RETRIES` | 発見一覧に目的名があるのに接続候補が空の時の追加探索回数（初回を除く） | `3` |
+| `DISCOVERY_RETRY_WAIT_SEC` | 追加探索前の待ち秒数 | `1` |
+| `AUTO_NOT_FOUND_ALERT_AFTER_TICKS` | 窓内の目的名不在が連続した時の通知閾値。15 分間隔で約 1 時間。`0` で無効 | `4` |
+| `AUTO_NOT_FOUND_ALERT_FILE` | 目的名の不在回数・通知済みフラグ（LAN 0 台検知とは別） | `logs/auto_not_found_alert_state.json` |
 
 `STEP`・`MANUAL_RISE_THRESHOLD`・`CHROMECAST_NAME` は他コマンドと共通です。夜間・テレビ電源の設定は `.env.example` と `config.py` に同じ既定値で載せています。
 
-- 対象 Cast だけが見つからない時は正常終了します。LAN 全体で 0 台が続いた時は ERROR・終了コード 2 とし、障害確定時と回復時に 1 回ずつ通知します。夜間窓の中だけこの検知を行います。
+- 対象 Cast だけが見つからない時は正常終了します。窓内で不在が既定 4 tick 続いたら一度だけ通知し、発見できたら回復も一度通知します。通知失敗時は次 tick で再送します。未通知の連続回数は stale でリセットし、通知済みの途切れは回復まで保持します。窓外では不在・回復とも記録を更新しません。LAN 全体で 0 台が続いた時は従来どおり ERROR・終了コード 2 とし、障害確定時と回復時に 1 回ずつ通知します。夜間窓の中だけこの検知を行います。
 - launchd 配下では、そのプロセスに macOS の「プライバシーとセキュリティ > ローカルネットワーク」の許可が必要です。
 - 音量に触れず視聴し続ける場合も、夜間窓の中では 3 tick で電源が切れます。テレビが消えていても mDNS に見えることがあります。電源は発見結果ではなく `is_on` で判断します。
 - stale な state は連続カウントを捨てますが、復元用 `original_volume` は保持します。すでに閾値に達した電源 OFF の再試行も保持します。旧 `powered_off` / `volume_at_power_off` は使用しません。壊れた JSON は作り直して続行し、保存は一時ファイルと置き換えで行います。
@@ -126,7 +130,7 @@ periodic-worker register \
   --cwd /path/to/nemucast \
   --command "/path/to/.venv/bin/nemucast-standby"
 
-# 24h、15分間隔で起動（制御は夜間窓の中だけ）
+# 24h、15分間隔で起動（夜間窓内に開始・進行中は完走）
 periodic-worker register \
   --name nemucast-auto --every 15m \
   --cwd /path/to/nemucast \
@@ -140,14 +144,16 @@ flowchart TD
     Start([15分タイマー]) --> Night{夜間窓の中または FORCE?}
     Night -->|No| Session{original_volume がある?}
     Session -->|No| End([終了])
-    Session -->|Yes| Cleanup[発見・MAC照合・電源確認]
+    Session -->|Yes| Fresh{state が stale でない?}
+    Fresh -->|Yes| Discover
+    Fresh -->|No| Cleanup[発見・MAC照合・電源確認]
     Cleanup -->|点灯| RestoreCleanup[元の音量へ復元し state 初期化]
     Cleanup -->|消灯| Clear[state 初期化]
     Cleanup -->|不明・見つからない| Defer[警告・state 保持で次回再試行]
     RestoreCleanup --> End
     Clear --> End
     Defer --> End
-    Night -->|Yes| Discover[Cast 発見・LAN 0 台検知]
+    Night -->|Yes| Discover[Cast 発見・窓内だけ不在と LAN 0 台検知]
     Discover --> Power[MAC照合・電源状態確認]
     Power -->|消灯| Clear
     Power -->|不明| Error[ERROR・通知・exit 1]
@@ -170,7 +176,7 @@ flowchart TD
 
 | 項目 | `nemucast-standby` | `nemucast-auto` | `nemucast`（手動） |
 |------|--------------------|------------------|--------------------|
-| 想定スケジュール | 時刻指定（例: 20:00） | 15分間隔で起動・夜間のみ制御 | 任意のタイミングで手動実行 |
+| 想定スケジュール | 時刻指定（例: 20:00） | 15分間隔・夜間に開始して完走 | 任意のタイミングで手動実行 |
 | 音量制御 | しない（テレビ本体の電源を切る） | する | する |
 | state | 持たない | `auto_standby_state.json` | `activity_state.json` |
 | 電源OFF条件 | 即時 | 連続 3 tick 下げた時点 | 連続 N tick 非アクティブ |
@@ -179,11 +185,12 @@ flowchart TD
 ## 📝 ログと state
 
 - 即時 standby ログ: `logs/standby.log`
-- 自動寝かしつけログ: `logs/auto_standby.log`。`tick 結果: lowered / outside_window / cleanup / already_off / turned_off` と音量復元・カウントを記録します
-- 確認例: `rg "tick 結果:|音量復元:|ERROR" logs/auto_standby.log`。初回の夜間運転後、復元が OFF 確認より前に出ていること、窓の外で `lowered` がないことを確認します
+- 自動寝かしつけログ: `logs/auto_standby.log`。`tick 結果: lowered / outside_window / cleanup / already_off / turned_off / not_found` と音量復元・カウントを記録します。電源判定時は `電源状態の生値: is_on=... current_app=... volume_level=...` を INFO に 1 行出します
+- 確認例: `rg "tick 結果:|電源状態の生値:|音量復元|ERROR" logs/auto_standby.log`。初回の夜間運転後、復元が OFF 確認より前に出ていること、窓の外で新規セッションが始まっていないこと（進行中なら `lowered` は正常）を確認します
 - 手動実行ログ: `logs/lower_cast_volume.log`
 - state:
   - `nemucast-auto` → `logs/auto_standby_state.json`
+  - 目的名不在通知 → `logs/auto_not_found_alert_state.json`（LAN 0 台検知は `logs/discovery_alert_state.json`）
   - `nemucast`（手動） → `logs/activity_state.json`
 
 ## ✅ テスト

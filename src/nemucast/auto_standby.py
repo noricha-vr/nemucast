@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import logging.handlers
+import math
 import os
 import shlex
 import subprocess
@@ -28,6 +29,8 @@ from nemucast.config import (
     AUTO_NIGHT_END,
     AUTO_NIGHT_FORCE,
     AUTO_NIGHT_START,
+    AUTO_NOT_FOUND_ALERT_AFTER_TICKS,
+    AUTO_NOT_FOUND_ALERT_FILE,
     AUTO_RESTORE_TOLERANCE,
     AUTO_RESTORE_VOLUME,
     AUTO_RESTORE_WAIT_SEC,
@@ -141,6 +144,14 @@ def in_night_window(now: datetime, start: str, end: str) -> bool:
     return current >= start_time or current < end_time
 
 
+def is_session_continuable(state: dict[str, Any]) -> bool:
+    """窓外でも続行してよい新鮮な進行中セッションか。NaN・無限大・未来時刻は新鮮と見なさない。"""
+    updated_at = state.get("updated_at")
+    if type(updated_at) not in (int, float) or not math.isfinite(updated_at):
+        return False
+    return 0 <= time.time() - updated_at <= AUTO_STATE_STALE_SEC
+
+
 def run_tick(
     cast: Any,
     state: dict[str, Any],
@@ -234,6 +245,7 @@ def cleanup_session(name: str, state: dict[str, Any]) -> None:
     try:
         cast, browser = discover_chromecasts(name)
         if cast is None:
+            logging.info("tick 結果: not_found device=%s", name)
             logging.warning("時間外の音量復元を保留: device=%s が見つかりません", name)
             return
         process_device(cast, name, state, cleanup=True)
@@ -358,6 +370,47 @@ def update_discovery_alert(
     return confirmed
 
 
+def load_not_found_alert(alert_file: Path, name: str) -> dict[str, Any]:
+    """目的名の不在通知 state を読む。壊れている時や対象変更時は初期化する。"""
+    default: dict[str, Any] = {"device_name": name, "missing_ticks": 0, "alerted": False}
+    try:
+        data = json.loads(alert_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+    if (
+        not isinstance(data, dict)
+        or data.get("device_name") != name
+        or type(data.get("missing_ticks")) is not int
+        or data["missing_ticks"] < 0
+        or type(data.get("alerted")) is not bool
+    ):
+        return default
+    return data
+
+
+def update_not_found_alert(name: str, found: bool) -> None:
+    """窓内だけで不在を数え、途切れごとの障害・回復を一度ずつ通知する。"""
+    if AUTO_NOT_FOUND_ALERT_AFTER_TICKS <= 0:
+        return
+    alert = load_not_found_alert(AUTO_NOT_FOUND_ALERT_FILE, name)
+    if found:
+        if alert["alerted"] and not send_discovery_alert(
+            f"nemucast: 目的の Chromecast '{name}' が再び見えるようになりました。"
+        ):
+            return
+        AUTO_NOT_FOUND_ALERT_FILE.unlink(missing_ok=True)
+        return
+    if not alert["alerted"] and is_state_stale(alert):
+        alert["missing_ticks"] = 0
+    alert["missing_ticks"] += 1
+    if alert["missing_ticks"] >= AUTO_NOT_FOUND_ALERT_AFTER_TICKS and not alert["alerted"]:
+        alert["alerted"] = send_discovery_alert(
+            f"nemucast: 目的の Chromecast '{name}' が夜間窓内で "
+            f"{alert['missing_ticks']} tick 連続で見つかりません。寝かしつけが止まっています。"
+        )
+    save_state(AUTO_NOT_FOUND_ALERT_FILE, alert)
+
+
 def main(args: list[str] | None = None) -> None:
     parsed = parse_args(args)
     setup_logging()
@@ -371,15 +424,28 @@ def main(args: list[str] | None = None) -> None:
         logging.error("夜間時刻の設定が不正です: %s", exc)
         sys.exit(1)
     if not night:
-        if state.get("original_volume") is not None:
-            cleanup_session(parsed.name, state)
-        else:
+        if state.get("original_volume") is None:
             logging.info("tick 結果: outside_window")
-        return
+            return
+        if not is_session_continuable(state):
+            cleanup_session(parsed.name, state)
+            return
+        logging.info("夜間窓外の進行中セッションを続行: device=%s", parsed.name)
 
     cast, browser = discover_chromecasts(parsed.name)
+    if night:
+        try:
+            update_not_found_alert(parsed.name, found=cast is not None)
+        except OSError as exc:
+            # 通知 state の I/O 失敗で寝かしつけ本体を止めない
+            logging.warning("不在通知 state を更新できませんでした: %s", exc)
+    if cast is None:
+        logging.info("tick 結果: not_found device=%s", parsed.name)
+    if not night and cast is None:
+        stop_discovery(browser)
+        return
     lan_has_devices = browser is not None and len(browser.devices) > 0
-    if not lan_has_devices:
+    if night and not lan_has_devices:
         stop_discovery(browser)
         # 目的デバイスが寝ていても他の Chromecast は常時 mDNS に出るので、
         # 0 台が続くのは環境側の障害。
@@ -393,7 +459,8 @@ def main(args: list[str] | None = None) -> None:
             sys.exit(EXIT_NO_DEVICE_ON_LAN)
         logging.warning("LAN 上の Chromecast が 1 台も見えません（一時的な可能性あり）。")
         return
-    update_discovery_alert(lan_has_devices=True)
+    if night:
+        update_discovery_alert(lan_has_devices=True)
     if cast is None:
         # 24時間 15分間隔で回すため、デバイスが mDNS に出ない時間帯の方が長い。
         # 「寝かしつける対象がない = やることがない」は成功扱いにしないと、

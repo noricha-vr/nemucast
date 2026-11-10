@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 from unittest.mock import Mock, patch
 
+import pytest
 import zeroconf
 
 from nemucast.cast_client import (
@@ -65,3 +66,56 @@ def test_standby_device() -> None:
 
     mock_cast.quit_app.assert_called_once()
     mock_sleep.assert_called_once_with(2)
+
+
+@pytest.mark.parametrize("succeeds", [True, False])
+def test_discovery_retries_when_target_is_visible(
+    succeeds: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一覧に目的名がある競合だけ再探索し、各 browser を一度ずつ閉じる。"""
+    from nemucast import cast_client
+
+    monkeypatch.setattr(cast_client, "DISCOVERY_MAX_RETRIES", 3)
+    monkeypatch.setattr(cast_client, "DISCOVERY_RETRY_WAIT_SEC", 0.25)
+    attempts = 2 if succeeds else 4
+    browsers = [Mock() for _ in range(attempts)]
+    for browser in browsers:
+        browser.devices = {"target": Mock(friendly_name="リビングルーム")}
+    target = Mock()
+    results = [([], browser) for browser in browsers]
+    if succeeds:
+        results[-1] = ([target], browsers[-1])
+    with (
+        patch.object(
+            cast_client.pychromecast, "get_listed_chromecasts", side_effect=results
+        ) as get,
+        patch.object(cast_client, "create_zeroconf") as create,
+        patch.object(cast_client.time, "sleep") as sleep,
+    ):
+        cast, browser = discover_chromecasts("リビングルーム")
+
+    assert cast is (target if succeeds else None)
+    assert browser is browsers[-1]
+    assert get.call_count == create.call_count == attempts
+    assert all(call.kwargs["friendly_names"] == ["リビングルーム"] for call in get.call_args_list)
+    assert sleep.call_count == attempts - 1
+    assert all(call.args == (0.25,) for call in sleep.call_args_list)
+    for retired in browsers[:-1]:
+        retired.stop_discovery.assert_called_once_with()
+    browser.stop_discovery.assert_not_called()
+    stop_discovery(browser)
+    browser.stop_discovery.assert_called_once_with()
+
+
+def test_discovery_does_not_retry_when_target_absent(
+    fake_network: Callable[[list[str]], Any],
+) -> None:
+    """普通の不在では再探索の待ち時間を増やさない。"""
+    with (
+        fake_network(["OtherDevice"]) as network,
+        patch("nemucast.cast_client.time.sleep") as sleep,
+    ):
+        cast, _ = discover_chromecasts("リビングルーム")
+    assert cast is None
+    network["get_listed"].assert_called_once()
+    sleep.assert_not_called()

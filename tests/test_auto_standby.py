@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import runpy
 import subprocess
 import time
 from collections.abc import Callable
@@ -40,6 +42,9 @@ def isolated_auto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(auto_standby, "AUTO_NIGHT_FORCE", True)
     monkeypatch.setattr(auto_standby, "AUTO_RESTORE_VOLUME", True)
     monkeypatch.setattr(auto_standby, "AUTO_STATE_FILE", tmp_path / "auto.json")
+    monkeypatch.setattr(auto_standby, "DISCOVERY_ALERT_FILE", tmp_path / "lan_alert.json")
+    monkeypatch.setattr(auto_standby, "AUTO_NOT_FOUND_ALERT_FILE", tmp_path / "missing_alert.json")
+    monkeypatch.setattr(auto_standby, "AUTO_NOT_FOUND_ALERT_AFTER_TICKS", 4)
     monkeypatch.setattr(auto_standby, "load_identity", Mock(return_value="aa:bb"))
     monkeypatch.setattr(auto_standby, "read_power_state", AsyncMock(return_value=True))
     monkeypatch.setattr(auto_standby, "power_off", AsyncMock(return_value="turned_off"))
@@ -108,6 +113,61 @@ class TestRunTick:
 )
 def test_night_window(clock: str, start: str, end: str, expected: bool) -> None:
     assert in_night_window(datetime.fromisoformat(f"2026-11-05T{clock}"), start, end) is expected
+
+
+@pytest.fixture
+def config_defaults(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """個人の .env に触れず、環境変数未指定時の既定値を検証する。"""
+    from nemucast import config
+
+    for key in (
+        "AUTO_NIGHT_START",
+        "AUTO_NIGHT_END",
+        "DISCOVERY_MAX_RETRIES",
+        "DISCOVERY_RETRY_WAIT_SEC",
+        "AUTO_NOT_FOUND_ALERT_AFTER_TICKS",
+        "AUTO_NOT_FOUND_ALERT_FILE",
+        "LOG_DIR",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda: None)
+    return runpy.run_path(config.__file__)
+
+
+def test_new_config_defaults(config_defaults: dict[str, Any]) -> None:
+    assert config_defaults["AUTO_NIGHT_START"] == "21:00"
+    assert config_defaults["AUTO_NIGHT_END"] == "06:00"
+    assert config_defaults["DISCOVERY_MAX_RETRIES"] == 3
+    assert config_defaults["DISCOVERY_RETRY_WAIT_SEC"] == 1
+    assert config_defaults["AUTO_NOT_FOUND_ALERT_AFTER_TICKS"] == 4
+    assert config_defaults["AUTO_NOT_FOUND_ALERT_FILE"] == Path(
+        "logs/auto_not_found_alert_state.json"
+    )
+
+
+@pytest.mark.parametrize(
+    "clock,expected",
+    [
+        ("20:59:00", False),
+        ("21:00:00", True),
+        ("23:59:00", True),
+        ("00:00:00", True),
+        ("05:59:00", True),
+        ("06:00:00", False),
+        ("12:00:00", False),
+    ],
+)
+def test_default_night_window_boundaries(
+    clock: str, expected: bool, config_defaults: dict[str, Any]
+) -> None:
+    assert (
+        in_night_window(
+            datetime.fromisoformat(f"2026-11-10T{clock}"),
+            config_defaults["AUTO_NIGHT_START"],
+            config_defaults["AUTO_NIGHT_END"],
+        )
+        is expected
+    )
 
 
 class TestStatePersistence:
@@ -232,6 +292,8 @@ class TestDiscoveryAlert:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(auto_standby, "DISCOVERY_ALERT_COMMAND", "notify --message")
         monkeypatch.setattr(auto_standby, "DISCOVERY_ALERT_AFTER_TICKS", 2)
+        # このクラスは LAN 全体の障害通知だけを検証する。目的名不在は別テストで検証
+        monkeypatch.setattr(auto_standby, "AUTO_NOT_FOUND_ALERT_AFTER_TICKS", 0)
         run = Mock()
         monkeypatch.setattr(auto_standby.subprocess, "run", run)
         return run
@@ -287,7 +349,7 @@ class TestDiscoveryAlert:
 
         assert notify.call_count == 2
         assert "再び見える" in notify.call_args.args[0][-1]
-        assert not (tmp_path / "logs" / "discovery_alert_state.json").exists()
+        assert not auto_standby.DISCOVERY_ALERT_FILE.exists()
 
     def test_single_transient_zero_does_not_alert(
         self, notify: Mock, fake_network: Callable[[list[str]], Any]
@@ -342,8 +404,7 @@ class TestDiscoveryAlert:
         """壊れたフラグファイルで毎 tick 落ち続けない"""
         from nemucast import auto_standby
 
-        flag = tmp_path / "logs" / "discovery_alert_state.json"
-        flag.parent.mkdir(parents=True)
+        flag = tmp_path / "lan_alert.json"
         if isinstance(content, bytes):
             flag.write_bytes(content)
         else:
@@ -365,7 +426,7 @@ class TestDiscoveryAlert:
 
     @staticmethod
     def _age_alert_file(tmp_path: Path, seconds: float) -> None:
-        flag = tmp_path / "logs" / "discovery_alert_state.json"
+        flag = tmp_path / "lan_alert.json"
         data = json.loads(flag.read_text(encoding="utf-8"))
         data["updated_at"] -= seconds
         flag.write_text(json.dumps(data), encoding="utf-8")
@@ -459,12 +520,15 @@ class TestNightMain:
         net["browser"].stop_discovery.assert_called_once()
 
     @staticmethod
-    def seed_session(count: int = 2) -> None:
+    def seed_session(count: int = 2, *, stale: bool = False) -> None:
         from nemucast import auto_standby
 
         state = fresh_state("Dell")
         state.update(original_volume=0.5, last_lowered_to=0.42, consecutive_lowered=count)
         save_state(auto_standby.AUTO_STATE_FILE, state)
+        if stale:
+            state["updated_at"] -= auto_standby.AUTO_STATE_STALE_SEC + 1
+            auto_standby.AUTO_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
 
     def test_restore_before_power_off_and_reset(self, fake_network, monkeypatch) -> None:
         from nemucast import auto_standby
@@ -533,7 +597,7 @@ class TestNightMain:
         from nemucast import auto_standby
         from nemucast.tv_power import TvPowerError
 
-        self.seed_session()
+        self.seed_session(stale=True)
         if power == "unknown":
             auto_standby.read_power_state.side_effect = TvPowerError("unknown")
         else:
@@ -554,7 +618,7 @@ class TestNightMain:
         """窓の終わり際に手動で上げられた音量を、古い元音量で上書きしない"""
         from nemucast import auto_standby
 
-        self.seed_session()
+        self.seed_session(stale=True)
         auto_standby.read_power_state.return_value = True
         with fake_network(["Dell"]) as net:
             cast = net["casts"]["Dell"]
@@ -566,7 +630,7 @@ class TestNightMain:
     def test_missing_device_cleanup_keeps_session(self, outside, fake_network) -> None:
         from nemucast import auto_standby
 
-        self.seed_session()
+        self.seed_session(stale=True)
         with fake_network([]):
             auto_standby.main(["--name", "Dell"])
         assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["original_volume"] == 0.5
@@ -745,3 +809,291 @@ def test_restore_volume_warns_but_continues_when_not_confirmed(caplog) -> None:
     with caplog.at_level("WARNING"):
         auto_standby.restore_volume(cast, {"original_volume": 0.23})
     assert "確認できませんでした" in caplog.text
+
+
+class TestNotFoundAlert:
+    @pytest.fixture
+    def notify(self, monkeypatch: pytest.MonkeyPatch) -> Mock:
+        from nemucast import auto_standby
+
+        notify = Mock(return_value=True)
+        monkeypatch.setattr(auto_standby, "send_discovery_alert", notify)
+        return notify
+
+    def test_threshold_alerts_once_and_logs_each_missing_tick(
+        self,
+        notify: Mock,
+        fake_network: Callable[[list[str]], Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from nemucast import auto_standby
+
+        with caplog.at_level(logging.INFO):
+            for count in range(1, 7):
+                with fake_network(["OtherDevice"]):
+                    assert auto_standby.main(["--name", "Dell"]) is None
+                saved = json.loads(auto_standby.AUTO_NOT_FOUND_ALERT_FILE.read_text())
+                assert saved["missing_ticks"] == count
+                assert saved["alerted"] is (count >= 4)
+                assert notify.call_count == (1 if count >= 4 else 0)
+        assert "4 tick" in notify.call_args.args[0]
+        assert caplog.messages.count("tick 結果: not_found device=Dell") == 6
+        assert not auto_standby.DISCOVERY_ALERT_FILE.exists()
+        assert not auto_standby.AUTO_STATE_FILE.exists()
+        auto_standby.read_power_state.assert_not_called()
+
+    def test_recovery_once_then_new_outage_can_alert(
+        self, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        from nemucast import auto_standby
+
+        for _ in range(4):
+            with fake_network(["OtherDevice"]):
+                auto_standby.main(["--name", "Dell"])
+        for _ in range(2):
+            with fake_network(["Dell"]) as net:
+                net["casts"]["Dell"].status.volume_level = 0.5
+                auto_standby.main(["--name", "Dell"])
+        assert notify.call_count == 2
+        assert "再び見える" in notify.call_args.args[0]
+        assert not auto_standby.AUTO_NOT_FOUND_ALERT_FILE.exists()
+        for _ in range(4):
+            with fake_network(["OtherDevice"]):
+                auto_standby.main(["--name", "Dell"])
+        assert notify.call_count == 3
+        assert "4 tick" in notify.call_args.args[0]
+
+    def test_failed_outage_and_recovery_notifications_retry_next_tick(
+        self, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        from nemucast import auto_standby
+
+        notify.side_effect = [False, True, False, True]
+        for count in range(1, 7):
+            with fake_network(["OtherDevice"]):
+                auto_standby.main(["--name", "Dell"])
+            saved = json.loads(auto_standby.AUTO_NOT_FOUND_ALERT_FILE.read_text())
+            assert saved["alerted"] is (count >= 5)
+        assert notify.call_count == 2
+        for count in range(1, 4):
+            with fake_network(["Dell"]) as net:
+                net["casts"]["Dell"].status.volume_level = 0.5
+                auto_standby.main(["--name", "Dell"])
+            assert auto_standby.AUTO_NOT_FOUND_ALERT_FILE.exists() is (count == 1)
+        assert notify.call_count == 4
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            b"\xff\xfe",
+            "{",
+            "[]",
+            "null",
+            '{"device_name":"OtherDevice","missing_ticks":4,"alerted":true}',
+            '{"device_name":"Dell","missing_ticks":true,"alerted":false}',
+            '{"device_name":"Dell","missing_ticks":-1,"alerted":false}',
+            '{"device_name":"Dell","missing_ticks":"4","alerted":false}',
+            '{"device_name":"Dell","missing_ticks":4,"alerted":"true"}',
+        ],
+    )
+    def test_corrupt_or_other_device_state_starts_over(
+        self, content: str | bytes, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        from nemucast import auto_standby
+
+        path = auto_standby.AUTO_NOT_FOUND_ALERT_FILE
+        path.write_bytes(content if isinstance(content, bytes) else content.encode())
+        with fake_network(["OtherDevice"]):
+            auto_standby.main(["--name", "Dell"])
+        assert json.loads(path.read_text())["missing_ticks"] == 1
+        with fake_network(["Dell"]) as net:
+            net["casts"]["Dell"].status.volume_level = 0.5
+            auto_standby.main(["--name", "Dell"])
+        assert not path.exists()
+        notify.assert_not_called()
+
+    @pytest.mark.parametrize("alerted", [True, False])
+    def test_scheduler_gap_resets_only_unnotified_outage(
+        self, alerted: bool, notify: Mock, fake_network: Callable[[list[str]], Any]
+    ) -> None:
+        from nemucast import auto_standby
+
+        path = auto_standby.AUTO_NOT_FOUND_ALERT_FILE
+        path.write_text(
+            json.dumps(
+                {
+                    "device_name": "Dell",
+                    "missing_ticks": 3,
+                    "alerted": alerted,
+                    "updated_at": time.time() - auto_standby.AUTO_STATE_STALE_SEC - 1,
+                }
+            )
+        )
+        with fake_network(["OtherDevice"]):
+            auto_standby.main(["--name", "Dell"])
+        data = json.loads(path.read_text())
+        assert data["missing_ticks"] == (4 if alerted else 1)
+        assert data["alerted"] is alerted
+        notify.assert_not_called()
+
+    def test_disabled_threshold(
+        self,
+        notify: Mock,
+        fake_network: Callable[[list[str]], Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nemucast import auto_standby
+
+        monkeypatch.setattr(auto_standby, "AUTO_NOT_FOUND_ALERT_AFTER_TICKS", 0)
+        for _ in range(5):
+            with fake_network(["OtherDevice"]):
+                auto_standby.main(["--name", "Dell"])
+        notify.assert_not_called()
+        assert not auto_standby.AUTO_NOT_FOUND_ALERT_FILE.exists()
+
+    def test_lan_zero_counter_is_independent(
+        self,
+        notify: Mock,
+        fake_network: Callable[[list[str]], Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nemucast import auto_standby
+
+        monkeypatch.setattr(auto_standby, "DISCOVERY_ALERT_AFTER_TICKS", 0)
+        for _ in range(4):
+            with fake_network([]):
+                auto_standby.main(["--name", "Dell"])
+        notify.assert_called_once()
+        assert json.loads(auto_standby.AUTO_NOT_FOUND_ALERT_FILE.read_text())["missing_ticks"] == 4
+        assert not auto_standby.DISCOVERY_ALERT_FILE.exists()
+
+    @pytest.mark.parametrize("session", ["none", "fresh", "stale"])
+    @pytest.mark.parametrize("found", [True, False])
+    def test_outside_neither_counts_nor_recovers(
+        self,
+        session: str,
+        found: bool,
+        notify: Mock,
+        fake_network: Callable[[list[str]], Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nemucast import auto_standby
+
+        monkeypatch.setattr(auto_standby, "AUTO_NIGHT_FORCE", False)
+        monkeypatch.setattr(auto_standby, "in_night_window", Mock(return_value=False))
+        lan_update = Mock()
+        monkeypatch.setattr(auto_standby, "update_discovery_alert", lan_update)
+        alert_file = auto_standby.AUTO_NOT_FOUND_ALERT_FILE
+        save_state(alert_file, {"device_name": "Dell", "missing_ticks": 4, "alerted": True})
+        before = alert_file.read_bytes()
+        if session != "none":
+            TestNightMain.seed_session(count=1, stale=session == "stale")
+        with fake_network(["Dell"] if found else []) as net:
+            if found:
+                net["casts"]["Dell"].status.volume_level = 0.42
+            auto_standby.main(["--name", "Dell"])
+        assert alert_file.read_bytes() == before
+        notify.assert_not_called()
+        lan_update.assert_not_called()
+
+
+@pytest.mark.parametrize("elapsed", [900, 1800])
+def test_fresh_session_completes_across_window_end(
+    elapsed: int, fake_network: Callable[[list[str]], Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """終了時刻直前の初回から、窓外の下げ・復元・OFF まで同じセッションを完走する。"""
+    from nemucast import auto_standby
+
+    clock = Mock(return_value=10000.0)
+    monkeypatch.setattr(auto_standby.time, "time", clock)
+    monkeypatch.setattr(auto_standby, "AUTO_NIGHT_FORCE", False)
+    monkeypatch.setattr(auto_standby, "AUTO_NIGHT_START", "21:00")
+    monkeypatch.setattr(auto_standby, "AUTO_NIGHT_END", "06:00")
+    now = Mock()
+    monkeypatch.setattr(auto_standby, "datetime", now)
+    # in_night_window の時刻解析には本物の datetime を使う
+    now.strptime = datetime.strptime
+    for index, (hour, volume) in enumerate((("05:45", 0.5), ("06:00", 0.46), ("06:15", 0.42))):
+        now.now.return_value = datetime.fromisoformat(f"2026-11-10T{hour}:00")
+        clock.return_value = 10000.0 + index * elapsed
+        with fake_network(["Dell"]) as net:
+            cast = net["casts"]["Dell"]
+            cast.status.volume_level = volume
+            auto_standby.main(["--name", "Dell"])
+        if index < 2:
+            cast.set_volume.assert_called_once_with(round(volume - 0.04, 2))
+            assert (
+                load_state(auto_standby.AUTO_STATE_FILE, "Dell")["consecutive_lowered"] == index + 1
+            )
+            auto_standby.power_off.assert_not_called()
+        else:
+            assert [call.args for call in cast.set_volume.call_args_list] == [(0.38,), (0.5,)]
+            auto_standby.power_off.assert_awaited_once()
+            assert load_state(auto_standby.AUTO_STATE_FILE, "Dell")["original_volume"] is None
+        net["browser"].stop_discovery.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("updated_at", "expected"),
+    [
+        (100000.0, True),
+        (98200.0, True),
+        (98199.0, False),
+        (100001.0, False),
+        (float("nan"), False),
+        (float("inf"), False),
+        (float("-inf"), False),
+        (None, False),
+        ("x", False),
+    ],
+)
+def test_is_session_continuable_boundaries(
+    updated_at: Any, expected: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """窓外継続は有限で未来でなく stale 以内の updated_at だけ許す（now=100000, 上限 1800 秒）。"""
+    from nemucast import auto_standby
+
+    monkeypatch.setattr(auto_standby.time, "time", lambda: 100000.0)
+    assert auto_standby.is_session_continuable({"updated_at": updated_at}) is expected
+
+
+def test_not_found_alert_io_error_does_not_stop_main(
+    fake_network: Callable[[list[str]], Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """通知 state の保存に失敗しても、寝かしつけ本体と探索の解放は続く。"""
+    from nemucast import auto_standby
+
+    monkeypatch.setattr(auto_standby, "AUTO_NIGHT_FORCE", True)
+    monkeypatch.setattr(auto_standby, "save_state", Mock(side_effect=OSError("denied")))
+    with fake_network(["OtherDevice"]) as net, caplog.at_level(logging.WARNING):
+        auto_standby.main(["--name", "Dell"])
+    assert "不在通知 state を更新できませんでした" in caplog.text
+    net["browser"].stop_discovery.assert_called_once()
+
+
+def test_future_updated_at_session_outside_window_is_cleaned_up_not_continued(
+    fake_network: Callable[[list[str]], Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未来時刻の state は新鮮扱いにせず、窓外では続行せず後始末に回す。"""
+    from nemucast import auto_standby
+
+    monkeypatch.setattr(auto_standby, "AUTO_NIGHT_FORCE", False)
+    monkeypatch.setattr(auto_standby, "AUTO_NIGHT_START", "21:00")
+    monkeypatch.setattr(auto_standby, "AUTO_NIGHT_END", "06:00")
+    now = Mock()
+    now.strptime = datetime.strptime
+    now.now.return_value = datetime.fromisoformat("2026-11-10T12:00:00")
+    monkeypatch.setattr(auto_standby, "datetime", now)
+    state = fresh_state("Dell")
+    state.update(original_volume=0.5, last_lowered_to=0.42, consecutive_lowered=1)
+    state["updated_at"] = time.time() + 3600
+    auto_standby.AUTO_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    auto_standby.AUTO_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+    cleanup = Mock()
+    monkeypatch.setattr(auto_standby, "cleanup_session", cleanup)
+    with fake_network(["Dell"]):
+        auto_standby.main(["--name", "Dell"])
+    cleanup.assert_called_once()
+    auto_standby.power_off.assert_not_awaited()

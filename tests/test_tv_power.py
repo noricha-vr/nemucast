@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+import logging
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -187,3 +188,32 @@ def test_read_power_state_wraps_disconnect_during_identity_read(monkeypatch) -> 
     with pytest.raises(TvPowerError):
         asyncio.run(tv_power.read_power_state("h", "aa:bb"))
     assert FakeRemote.sent == 0
+
+
+@pytest.mark.parametrize("is_on", [True, False])
+@pytest.mark.parametrize("metadata", [True, False])
+def test_read_power_state_logs_raw_snapshot(
+    is_on: bool,
+    metadata: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """False の判定も生値を INFO 一行で追え、任意の情報がなくても読み取りは成功する。"""
+    remote = Mock(spec=["disconnect", "send_key_command"])
+    if metadata:
+        remote.current_app = "com.example.player"
+        remote.volume_info = {"level": 23, "max": 100, "muted": False}
+    monkeypatch.setattr(tv_power, "read_mac", AsyncMock(return_value="test-mac"))
+    monkeypatch.setattr(tv_power, "_read_is_on", AsyncMock(return_value=(remote, is_on)))
+    with caplog.at_level(logging.INFO):
+        result = asyncio.run(tv_power.read_power_state("test-host", "test-mac"))
+    assert result is is_on
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.INFO
+    assert caplog.messages == [
+        f"電源状態の生値: is_on={is_on!r} "
+        f"current_app={('com.example.player' if metadata else None)!r} "
+        f"volume_level={(23 if metadata else None)!r}"
+    ]
+    remote.disconnect.assert_called_once_with()
+    remote.send_key_command.assert_not_called()
