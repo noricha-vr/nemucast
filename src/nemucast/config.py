@@ -27,6 +27,7 @@ RUN_UNTIL_STANDBY = os.getenv("RUN_UNTIL_STANDBY", "0") == "1"
 STATE_STALE_INTERVAL_MULTIPLIER = int(os.getenv("STATE_STALE_INTERVAL_MULTIPLIER", "2"))
 
 # ローカル時刻の夜間窓。終了時刻は含めない。FORCE は昼間の動作確認用
+AUTO_TARGET_NAME = os.getenv("AUTO_TARGET_NAME", "Dell")
 AUTO_NIGHT_START = os.getenv("AUTO_NIGHT_START", "21:00")
 AUTO_NIGHT_END = os.getenv("AUTO_NIGHT_END", "06:00")
 AUTO_NIGHT_FORCE = os.getenv("AUTO_NIGHT_FORCE", "0") == "1"
@@ -60,6 +61,11 @@ DISCOVERY_RETRY_WAIT_SEC = float(os.getenv("DISCOVERY_RETRY_WAIT_SEC", "1"))
 AUTO_NOT_FOUND_ALERT_AFTER_TICKS = int(os.getenv("AUTO_NOT_FOUND_ALERT_AFTER_TICKS", "4"))
 AUTO_NOT_FOUND_ALERT_FILE = Path(
     os.getenv("AUTO_NOT_FOUND_ALERT_FILE", f"{LOG_DIR}/auto_not_found_alert_state.json")
+)
+
+# 未ペアリングで電源を切れない時の通知日（ローカル日付、1 日 1 回まで）
+AUTO_POWER_OFF_ALERT_FILE = Path(
+    os.getenv("AUTO_POWER_OFF_ALERT_FILE", f"{LOG_DIR}/auto_power_off_alert_state.json")
 )
 
 # ログファイルのローテーション設定

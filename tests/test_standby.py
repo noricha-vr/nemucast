@@ -105,3 +105,22 @@ def test_oserror_exits_nonzero_and_alerts() -> None:
             standby.main(args=["--name", "Living"])
     assert exc.value.code == 1
     alert.assert_called_once()
+
+
+@pytest.mark.parametrize("auto_target", ["Dell", "OtherCast"])
+def test_default_target_stays_chromecast_name(
+    auto_target: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AUTO_TARGET_NAME を変更しても 20:00 standby は CHROMECAST_NAME を使う。"""
+    import runpy
+
+    from nemucast import config
+
+    monkeypatch.setattr("dotenv.load_dotenv", lambda: None)
+    monkeypatch.setenv("CHROMECAST_NAME", "リビングルーム")
+    monkeypatch.setenv("AUTO_TARGET_NAME", auto_target)
+    values = runpy.run_path(config.__file__)
+    monkeypatch.setattr(config, "CHROMECAST_NAME", values["CHROMECAST_NAME"])
+    monkeypatch.setattr(config, "AUTO_TARGET_NAME", values["AUTO_TARGET_NAME"])
+    module = runpy.run_path(standby.__file__)
+    assert module["parse_args"]([]).name == "リビングルーム"

@@ -20,15 +20,24 @@ AI エージェント（Claude Code / Codex 等）がこのリポジトリを操
 
 ## プロジェクト概要
 
-リビングのテレビ（シャープ AQUOS-4KTVJ26-1、Cast built-in の Google TV）の電源を、2 つの運用で切る CLI ツール。
+リビングルームのテレビ（シャープ AQUOS-4KTVJ26-1）と Dell（モニターに挿した Chromecast）を、機器ごとに別の運用で制御する CLI ツール。
 Chromecast の active / idle 判定には依存せず、`前回自動設定した音量` と `現在音量` の差分からユーザー活動を推定する。
+
+## 機器ごとの役割（混ぜない）
+
+- リビングルーム（テレビ）= 20:00 に電源を切る、それだけ。`nemucast-standby` / `nemucast-20`、対象は `CHROMECAST_NAME`（運用値 `リビングルーム`）。
+- Dell（モニターの Chromecast）= 21:00〜06:00 に 15 分ごとに音量を下げ、下がり切ったら元音量に戻して電源を切る。`nemucast-auto`、対象は `AUTO_TARGET_NAME`（既定 `Dell`）。
+- この 2 つを混ぜない。夜間窓の処理をリビングルームに向けず、20:00 の処理を Dell に向けない。対象を変える時は CEO に確認する。
+- Dell は 2026-11-10 にペアリング済み。電源 OFF の実機試験は成功と報告済み（`is_on` が True→False）。Android TV Remote の POWER を使う。未ペアリング時は音量を下げ、元音量へ復元して `quit_app` を試すところまで。電源 OFF 不可を WARNING と通知で知らせる。
+- auto はペアリング済みなら `cast.wait` 後、音量・生値ログ・アプリ判定より先に `read_power_state` で MAC を照合する（戻り値の `is_on` を視聴判定にも使い、追加接続はしない）。未ペアリングの機器は名前のみで選び、MAC を照合できない。
+- auto はペアリング済みの `is_on=True`、または `cast.status.app_id` が None・空文字・Backdrop 以外なら視聴中とする。未ペアリングはアプリ起動中だけで判定する。`is_idle`・CEC フラグ・`player_state` は判定に使わず、どちらも満たさない時だけ `not_watching` として元音量があれば復元後に state を初期化する（手動で上げられた音量は保つ）。
 
 ### 2 つの運用（periodic-worker の別タスク。普段は両方 active）
 
 | 運用 | コマンド / タスク | 役割 |
 |------|-------------------|------|
-| 20:00 の即 OFF | `nemucast-standby` / `nemucast-20`（cron `0 20 * * *` Asia/Tokyo） | 音量に触れず、テレビ本体の電源を切る。読み戻しで確認し、失敗は exit 1 + Discord 通知 |
-| 深夜の段階 OFF | `nemucast-auto` / `nemucast-auto`（15 分間隔） | 既定 21:00〜06:00 の窓内で開始し、新鮮な進行中セッションは窓外でも完走する。音量を段階的に下げ、点灯中に元の音量へ戻してから電源を切る。窓外では新規セッションを開始せず、stale な進行中セッションは音量復元だけ行う |
+| 20:00 の即 OFF | `nemucast-standby` / `nemucast-20`（cron `0 20 * * *` Asia/Tokyo） | リビングルームの音量に触れず、テレビ本体の電源を切る。読み戻しで確認し、失敗は exit 1 + Discord 通知 |
+| 深夜の段階 OFF | `nemucast-auto` / `nemucast-auto`（15 分間隔） | Dell を対象に既定 21:00〜06:00 の窓内で開始し、新鮮な進行中セッションは窓外でも完走する。視聴中（ペア済みの点灯またはアプリ起動中）に音量を段階的に下げ、元の音量へ戻してから電源 OFF を試す（未ペアリングは `quit_app` まで）。窓外では新規セッションを開始せず、stale な進行中セッションは音量復元だけ行う |
 
 - 片方だけ止める時は `periodic-worker update <タスク名> --status inactive`（戻す時は `active`）。専用の切替コマンドは作らない。
 - 夜間窓は環境変数で変えられる（`AUTO_NIGHT_START` / `AUTO_NIGHT_END`。昼でも試す時は `AUTO_NIGHT_FORCE=1`）。
@@ -41,6 +50,7 @@ Chromecast の active / idle 判定には依存せず、`前回自動設定し�
 - 電源が切れていても mDNS・6466・8009 は残る（数分は実測）。「見えない」は「切れている」の根拠にならない。電源は発見結果ではなく `is_on` で判断する。
 - 接続先は Cast の発見結果から毎回得る（IP 固定にしない）。見えない時は同名の前回 IP を使い、ペアリング時に記録したテレビの MAC と照合する。
 - **ペアリング**（初回のみ。PIN はテレビ画面に出るので人の読み取りが要る）: `uv run --frozen nemucast-tv-pair --pin-file <PIN を書くファイル> --need-file <PIN 要求を書くファイル>`。`--need-file` に要求が書かれ、`--pin-file` に PIN が書かれるのを最大 10 分待つ。完了すると証明書・鍵・MAC・IP を保存する。
+- Dell のペアリング手順: `uv run --frozen nemucast-tv-pair --name Dell --pin-file <PIN を書くファイル> --need-file <PIN 要求を書くファイル>`。
 - **鍵の置き場所**: `TV_CERT_DIR`（既定 `~/.config/nemucast`、ディレクトリ 0700・ファイル 0600、Git 管理外）。`tv_cert.pem` / `tv_key.pem`（クライアント証明書と秘密鍵）、`identities.json`（名前→テレビの MAC）、`last_hosts.json`（名前→前回の IP）。値をログや Issue に書かない。
 
 ## uv の注意
@@ -103,7 +113,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 
 | コマンド | 用途 | 主な設定 |
 |----------|------|----------|
-| `nemucast-auto` | 15 分間隔で起動し、ローカル時刻 21:00〜06:00 に音量を下げ、点灯中に元音量へ戻してテレビ電源 OFF を確認する | `AUTO_NIGHT_START=21:00`, `AUTO_NIGHT_END=06:00`, `AUTO_NIGHT_FORCE=0`, `AUTO_RESTORE_VOLUME=1`, `AUTO_RESTORE_WAIT_SEC=5`, `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800`, `DISCOVERY_ALERT_COMMAND`（LAN 上 0 台が `DISCOVERY_ALERT_AFTER_TICKS=2` 回続いたら終了コード 2 と通知、回復時も 1 回通知） |
+| `nemucast-auto` | Dell の視聴中（ペア済みの点灯またはアプリ起動中）にローカル時刻 21:00〜06:00 に 15 分間隔で音量を下げ、元音量へ復元して電源 OFF を試す。未ペアリングは `quit_app` と日次通知まで | `AUTO_TARGET_NAME=Dell`, `AUTO_POWER_OFF_ALERT_FILE=logs/auto_power_off_alert_state.json`, `AUTO_NIGHT_START=21:00`, `AUTO_NIGHT_END=06:00`, `AUTO_NIGHT_FORCE=0`, `AUTO_RESTORE_VOLUME=1`, `AUTO_RESTORE_WAIT_SEC=5`, `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800`, `DISCOVERY_ALERT_COMMAND`（LAN 上 0 台が `DISCOVERY_ALERT_AFTER_TICKS=2` 回続いたら終了コード 2 と通知、回復時も 1 回通知） |
 | `nemucast-standby` | 20:00 の即 OFF 用。テレビ本体の電源を切り、読み戻して確認する。音量制御も state も持たない。失敗は exit 1 + `DISCOVERY_ALERT_COMMAND` | `CHROMECAST_NAME`, `TV_CERT_DIR`, `TV_POWER_*` |
 | `nemucast` | 手動デバッグ用。1回の tick 実行または `--run-until-standby` で継続実行 | `INTERVAL_SEC=1200`, `INACTIVE_THRESHOLD=3`, `STATE_FILE=logs/activity_state.json` |
 
@@ -116,8 +126,8 @@ state を持つのは `nemucast-auto` と `nemucast`（手動）の 2 つで、�
 | キー | 意味 |
 |------|------|
 | `last_lowered_to` | 直近で自動設定した音量 |
-| `consecutive_lowered` | 連続で音量を下げた回数。`AUTO_LOWERED_THRESHOLD` に達した tick でテレビの電源 OFF を確認 |
-| `original_volume` | セッション開始時の音量。手動上昇時に更新。点灯中の復元用 |
+| `consecutive_lowered` | 連続で音量を下げた回数。`AUTO_LOWERED_THRESHOLD` に達した tick で対象の電源 OFF を試す（未ペアリングは `quit_app`） |
+| `original_volume` | セッション開始時の音量。手動上昇時に更新。セッション終了・視聴終了・時間外の後始末時の復元用 |
 | `updated_at` | 最終更新時刻（UNIX 秒） |
 
 `nemucast`（`logs/activity_state.json`）:
@@ -132,9 +142,12 @@ state を持つのは `nemucast-auto` と `nemucast`（手動）の 2 つで、�
   - `nemucast`: `now - updated_at > INTERVAL_SEC * STATE_STALE_INTERVAL_MULTIPLIER`（既定 2 倍）を超えたら破棄して再スタート
   - `nemucast-auto`: `AUTO_STATE_STALE_SEC`（既定 1800 秒）を超えたら連続カウントを捨てる。ただし復元用 `original_volume` と、閾値到達後の電源 OFF 再試行は保持する
 - state が壊れて読めない場合は作り直して続行する（毎 tick 例外で落ちて自力復帰できなくなるのを防ぐ）。書き込みは一時ファイル + `os.replace` でアトミックに行う
-- `nemucast-auto` は電源 OFF 成功時・消灯確認時・時間外の後始末完了時に state を初期化する。`nemucast-standby` は state を操作しない
+- `nemucast-auto` は電源 OFF 成功時・未ペアリング時のアプリ終了試行後・視聴終了の音量復元後・時間外の後始末完了時に state を初期化する。視聴終了と時間外の復元は手動の音量上昇を上書きしない。`nemucast-standby` は state を操作しない
 - 窓外でも `original_volume` があり state が stale でなければ通常制御を続行する。stale なら音量を復元して終了する
 - 目的名不在通知は `AUTO_NOT_FOUND_ALERT_FILE=logs/auto_not_found_alert_state.json` で管理し、窓内の不在が `AUTO_NOT_FOUND_ALERT_AFTER_TICKS=4` 回続いたら一度通知、回復も一度通知する。通知失敗時は次 tick で再送する。LAN 0 台検知とは別管理で、壊れたファイルは初期化する
+- 電源 OFF 不可の通知日（ローカル日付 YYYY-MM-DD）は `AUTO_POWER_OFF_ALERT_FILE=logs/auto_power_off_alert_state.json` に保存する。同日は一度まで、翌日は再通知し、通知失敗時は送信日を記録せず再送待ちだけ保持し、セッション終了後や窓外でも次 tick で再送する。ペアリング済みなら再送待ちを解除して送らない。壊れたファイルは未通知として扱う。
+- auto のログ語彙は `outside_window / not_watching / not_found / lowered / turned_off / power_off_unavailable / cleanup`（ペアリング後の OFF 時にすでに消灯なら `power_off` の戻り値 `already_off`）。毎 tick、接続・機器照合後に `対象機器の生値: device=... is_on=... app_id=... display_name=... is_idle=... is_stand_by=... is_active_input=... volume=...` を INFO で記録する。`app_id` / `display_name` は制御文字を escape し、各 64 文字以内に制限する。
+- 各機器処理の正常終了時に `tick 要約: device=Dell is_on=True app_id=None volume_before=0.44 volume_after=0.40 count=1 result=lowered` を INFO で 1 行出す。`grep "tick 要約" logs/auto_standby.log` で確認できる。`is_on` / `app_id` は操作前（未ペアの `is_on` は `None`）、音量は開始時と終了時の目標値（不明は `None`）。`count` はその tick の連続回数（`not_watching` / `cleanup` は初期化後の 0、OFF 結果は初期化前）。機器名・アプリ ID は制御文字を escape し、各 64 文字以内に制限する。
 - 発見一覧に目的名があるのに接続候補が空の時は `DISCOVERY_RETRY_WAIT_SEC=1` 秒待ち、初回に加えて最大 `DISCOVERY_MAX_RETRIES=3` 回再探索する
 
 ## 環境変数
