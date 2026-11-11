@@ -36,6 +36,11 @@ AUTO_RESTORE_VOLUME = os.getenv("AUTO_RESTORE_VOLUME", "1") == "1"
 # 反映前に電源を切ると翌日の音量が 0 になった（2026-11-05 実機）
 AUTO_RESTORE_WAIT_SEC = float(os.getenv("AUTO_RESTORE_WAIT_SEC", "5"))
 AUTO_RESTORE_TOLERANCE = float(os.getenv("AUTO_RESTORE_TOLERANCE", "0.015"))
+# ATV の初回音量 push と、音量キー送信後の更新通知を待つ秒数
+AUTO_ATV_VOLUME_WAIT_SEC = float(os.getenv("AUTO_ATV_VOLUME_WAIT_SEC", "5"))
+AUTO_VOLUME_ALERT_FILE = Path(
+    os.getenv("AUTO_VOLUME_ALERT_FILE", f"{LOG_DIR}/auto_volume_alert_state.json")
+)
 
 # Chromecast を quit_app した後、standby 完了を待つ秒数
 STANDBY_WAIT_SEC = int(os.getenv("STANDBY_WAIT_SEC", "2"))
