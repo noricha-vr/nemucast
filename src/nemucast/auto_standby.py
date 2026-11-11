@@ -411,6 +411,9 @@ async def restore_atv_volume(
     except TvPowerError as exc:
         logging.warning("音量復元を読み戻しで確認できませんでした: %s", exc)
         if cleanup:
+            # 復元の途中経過を残す。残さないと次 tick で自分の UP を手動上昇と誤認して打ち切る
+            state["last_lowered_to"] = control.volume.level
+            save_state(AUTO_STATE_FILE, state)
             raise
     return original
 

@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from androidtvremote2 import ConnectionClosed
 
 from nemucast import auto_standby as auto
 from nemucast import tv_volume
@@ -379,6 +380,38 @@ def test_cleanup_restore_failure_keeps_session(rig: Mock) -> None:
     rig.tick(cleanup=True)
     assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["original_volume"] == 15
     auto.power_off.assert_not_awaited()
+
+
+def test_cleanup_restore_progress_survives_disconnect_and_retry_finishes(rig: Mock) -> None:
+    """復元の途中で切れても、次の後始末が自分の UP を手動上昇と誤認せず完走する。"""
+    seed_atv(original=15, last=10)
+    rig.level = 10
+    original_send = rig.send_error
+    calls = {"n": 0}
+    real_factory = tv_volume.AndroidTVRemote.side_effect
+
+    def flaky(*args: Any) -> Mock:
+        remote = real_factory(*args)
+        inner = remote.send_key_command.side_effect
+
+        def send(key: str) -> None:
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise ConnectionClosed("lost")
+            inner(key)
+
+        remote.send_key_command.side_effect = send
+        return remote
+
+    tv_volume.AndroidTVRemote.side_effect = flaky
+    rig.tick(cleanup=True)
+    assert rig.level == 12
+    assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["original_volume"] == 15
+    tv_volume.AndroidTVRemote.side_effect = real_factory
+    rig.send_error = original_send
+    rig.tick(cleanup=True)
+    assert rig.level == 15
+    assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["original_volume"] is None
 
 
 def test_power_failure_propagates_and_retries_without_lowering(rig: Mock) -> None:
