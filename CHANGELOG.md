@@ -19,7 +19,7 @@
 - 依存に `androidtvremote2==0.3.2` を追加
 
 ### Fixed
-- `nemucast-auto`: 新しいテレビで Cast 音量が 0.0 固定のため、音量が下がらないまま 3 tick で電源が切れていた（#47）。Cast 音量が 0 以下・未受信でペアリング済みの時は、MAC 照合済みの Android TV Remote の `volume_info`（level/max）とキー `VOLUME_DOWN` / `VOLUME_UP` で整数段ごとに下げ、毎段新規接続で読み戻して確認する。元音量・手動上昇の判定・復元の読み戻しも同じ音量源で行う。音量が取れない時は電源を切らず、WARNING と日次通知（`AUTO_VOLUME_ALERT_FILE`）で `volume_unavailable` にする。`対象機器の生値` と `tick 要約` に `volume_source=cast|atv|none`（atv は `atv_level=n/max`）を追記。Cast 音量が使える機器は従来どおり
+- `nemucast-auto`: Dell で Cast の音量の読みが 0.0 固定になったため、音量が下がらないまま 3 tick で電源が切れていた（#47）。Cast 音量が 0 以下・未受信でペアリング済みの時は、MAC 照合済みの Android TV Remote の `volume_info`（level/max）とキー `VOLUME_DOWN` / `VOLUME_UP` で整数段ごとに下げ、毎段新規接続で読み戻して確認する。元音量・手動上昇の判定・復元の読み戻しも同じ音量源で行う。音量が取れない時は電源を切らず、WARNING と日次通知（`AUTO_VOLUME_ALERT_FILE`）で `volume_unavailable` にする。`対象機器の生値` と `tick 要約` に `volume_source=cast|atv|none`（atv は `atv_level=n/max`）を追記。Cast 音量が使える機器は従来どおり
 - `nemucast-auto`: ペアリング済みで `is_on=True` なら `app_id=None` でも視聴中として扱い、アプリ情報欠落による制御の取りこぼしを防ぐ。MAC 照合時の値を再利用し、接続は増やさない
 - `nemucast-auto`: 視聴終了時も元音量へ復元してから state を初期化し、手動で上げた音量は維持する
 - `nemucast-auto`: ペアリング済み機器は音量操作・生値ログ・アプリ判定より前に MAC を照合し、不一致や接続失敗時は通常処理・時間外の復元処理とも中断する
