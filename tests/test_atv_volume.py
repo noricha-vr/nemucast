@@ -385,6 +385,9 @@ def test_cleanup_restore_failure_keeps_session(rig: Mock) -> None:
 def test_cleanup_restore_progress_survives_disconnect_and_retry_finishes(rig: Mock) -> None:
     """復元の途中で切れても、次の後始末が自分の UP を手動上昇と誤認せず完走する。"""
     seed_atv(original=15, last=10)
+    stale = json.loads(auto.AUTO_STATE_FILE.read_text(encoding="utf-8"))
+    stale["updated_at"] = time.time() - auto.AUTO_STATE_STALE_SEC - 600
+    auto.AUTO_STATE_FILE.write_text(json.dumps(stale), encoding="utf-8")
     rig.level = 10
     original_send = rig.send_error
     calls = {"n": 0}
@@ -407,6 +410,9 @@ def test_cleanup_restore_progress_survives_disconnect_and_retry_finishes(rig: Mo
     rig.tick(cleanup=True)
     assert rig.level == 12
     assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["original_volume"] == 15
+    saved = json.loads(auto.AUTO_STATE_FILE.read_text(encoding="utf-8"))
+    assert saved["updated_at"] == stale["updated_at"]
+    assert not auto.is_session_continuable(saved)
     tv_volume.AndroidTVRemote.side_effect = real_factory
     rig.send_error = original_send
     rig.tick(cleanup=True)

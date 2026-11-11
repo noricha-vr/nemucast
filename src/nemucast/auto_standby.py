@@ -149,9 +149,11 @@ def load_state(state_file: Path, device_name: str) -> dict[str, Any] | None:
     return state
 
 
-def save_state(state_file: Path, state: dict[str, Any]) -> None:
+def save_state(state_file: Path, state: dict[str, Any], *, touch: bool = True) -> None:
+    """state を保存する。touch=False なら updated_at を更新しない（stale 判定を保つ）。"""
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    state["updated_at"] = time.time()
+    if touch:
+        state["updated_at"] = time.time()
     # 書き込み途中で kill されても壊れた JSON を残さないよう、一時ファイル経由で置き換える
     tmp_file = state_file.with_name(f"{state_file.name}.tmp")
     tmp_file.write_text(
@@ -413,7 +415,8 @@ async def restore_atv_volume(
         if cleanup:
             # 復元の途中経過を残す。残さないと次 tick で自分の UP を手動上昇と誤認して打ち切る
             state["last_lowered_to"] = control.volume.level
-            save_state(AUTO_STATE_FILE, state)
+            # updated_at は更新しない（stale な窓外セッションを新鮮と誤認して通常制御しない）
+            save_state(AUTO_STATE_FILE, state, touch=False)
             raise
     return original
 
