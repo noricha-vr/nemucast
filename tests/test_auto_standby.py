@@ -51,6 +51,10 @@ def isolated_auto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(auto_standby, "AUTO_POWER_OFF_ALERT_FILE", tmp_path / "power_alert.json")
     monkeypatch.setattr(auto_standby, "power_off", AsyncMock(return_value="turned_off"))
     monkeypatch.setattr(auto_standby, "read_power_state", AsyncMock(return_value=True))
+    # Cast が読めないケースも実際の ATV 接続・通知には到達させない。
+    control = Mock(read=AsyncMock(return_value=None))
+    monkeypatch.setattr(auto_standby, "AtvVolumeControl", Mock(return_value=control))
+    monkeypatch.setattr(auto_standby, "AUTO_VOLUME_ALERT_FILE", tmp_path / "volume_alert.json")
 
 
 class TestRunTick:
@@ -1120,7 +1124,7 @@ def test_dell_app_lowers_despite_idle_cec_and_logs_raw_values(
         caplog.messages.count(
             "対象機器の生値: device=Dell is_on=True app_id='AndroidNativeApp' "
             "display_name='U-NEXT for TV' "
-            "is_idle=True is_stand_by=True is_active_input=False volume=0.44"
+            "is_idle=True is_stand_by=True is_active_input=False volume=0.44 volume_source=cast"
         )
         == 1
     )
@@ -1161,9 +1165,7 @@ def test_not_watching_keeps_restore_state_when_volume_unavailable(
         cast.status.volume_level = None
         if missing_status:
             cast.status = None
-        with pytest.raises(SystemExit) as exc:
-            auto_standby.main(["--name", "Dell"])
-        assert exc.value.code == 1
+        auto_standby.main(["--name", "Dell"])
     cast.set_volume.assert_not_called()
     auto_standby.power_off.assert_not_awaited()
     assert auto_standby.AUTO_STATE_FILE.read_bytes() == before
@@ -1411,7 +1413,8 @@ def test_process_device_tick_summary_each_exit(
     assert summaries == [
         f"tick 要約: device=Dell is_on={is_on} app_id={cast.status.app_id!r} "
         f"volume_before={expected_before} volume_after={expected_after} "
-        f"count={expected_count} result={result}"
+        f"count={expected_count} result={result} "
+        f"volume_source={'none' if before is None else 'cast'}"
     ]
     assert len([msg for msg in caplog.messages if msg.startswith("tick 結果:")]) == 1
     if after != before:

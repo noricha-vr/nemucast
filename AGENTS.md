@@ -26,11 +26,14 @@ Chromecast の active / idle 判定には依存せず、`前回自動設定し�
 ## 機器ごとの役割（混ぜない）
 
 - リビングルーム（テレビ）= 20:00 に電源を切る、それだけ。`nemucast-standby` / `nemucast-20`、対象は `CHROMECAST_NAME`（運用値 `リビングルーム`）。
-- Dell（モニターの Chromecast）= 21:00〜06:00 に 15 分ごとに音量を下げ、下がり切ったら元音量に戻して電源を切る。`nemucast-auto`、対象は `AUTO_TARGET_NAME`（既定 `Dell`）。
+- Dell（モニターに挿した Chromecast）= 21:00〜06:00 に 15 分ごとに音量を下げ、3 回連続で下げたら元音量に戻して電源を切る。`nemucast-auto`、対象は `AUTO_TARGET_NAME`（既定 `Dell`）。
 - この 2 つを混ぜない。夜間窓の処理をリビングルームに向けず、20:00 の処理を Dell に向けない。対象を変える時は CEO に確認する。
 - Dell は 2026-11-10 にペアリング済み。電源 OFF は 2026-11-10 22:13 の実機試験で `is_on` が True→False になることを確認済み（CEO も目視で確認）。Android TV Remote の POWER を使う。未ペアリング時は音量を下げ、元音量へ復元して `quit_app` を試すところまで。電源 OFF 不可を WARNING と通知で知らせる。
 - auto はペアリング済みなら `cast.wait` 後、音量・生値ログ・アプリ判定より先に `read_power_state` で MAC を照合する（戻り値の `is_on` を視聴判定にも使い、追加接続はしない）。未ペアリングの機器は名前のみで選び、MAC を照合できない。
 - auto はペアリング済みの `is_on=True`、または `cast.status.app_id` が None・空文字・Backdrop 以外なら視聴中とする。未ペアリングはアプリ起動中だけで判定する。`is_idle`・CEC フラグ・`player_state` は判定に使わず、どちらも満たさない時だけ `not_watching` として元音量があれば復元後に state を初期化する（手動で上げられた音量は保つ）。
+
+- 音量源は有効な正の Cast 音量なら `cast`、Cast が 0 以下（許容誤差 `1e-6`）・未受信・不正値で、ペアリング済みかつ MAC 照合後の ATV 音量（整数 `level`、`max>0`）が取れた時だけ `atv` です。ATV の 1 tick の下げ幅は `max(1, round(-STEP * max))` 段、下限は `max(1, ceil(AUTO_MIN_LEVEL * max))` 段とし、下限より小さい現在音量は上げません。各キーの送信後に新規接続・MAC 照合で読み戻し、その接続を次のキーに使います。実際に下がらなければ `volume_unchanged` としてカウントを据え置きます。ATV の手動上昇は `level > last_lowered_to + MANUAL_RISE_THRESHOLD * max` で判定し、通常制御では元音量を更新して数え直し、後始末では復元しません。復元は差分の `VOLUME_UP` と各キーの読み戻しで確認し、元音量との差が 1 段以内を成功とします。OFF 前の復元失敗は WARNING で OFF を優先し、後始末の復元失敗は state を保持します。音量源または ATV の max が変わったら単位を混ぜずセッションを初期化します。
+- 必要な音量がどちらからも取れない時は `volume_unavailable` を WARNING と tick 要約に記録し、カウント・復元情報を保持して音量操作も電源 OFF もしません。通知は `AUTO_VOLUME_ALERT_FILE=logs/auto_volume_alert_state.json` にローカル日付の成功日を保存し、同日 1 回まで（失敗時は失敗が続く次 tick で再送）。視聴しておらず復元情報もない時は従来どおり `not_watching` で終了します。
 
 ### 2 つの運用（periodic-worker の別タスク。普段は両方 active）
 
@@ -46,6 +49,7 @@ Chromecast の active / idle 判定には依存せず、`前回自動設定し�
 
 - **`quit_app` ではこの機種の電源は切れない**（ホーム画面に戻るだけ。2026-11-05 に実機で確認）。電源OFFは `tv_power`（Android TV Remote v2、`androidtvremote2` 版固定）で POWER を送る。手動の `nemucast`（`volume.py`）は今も `cast_client.standby_device`（= `quit_app`）を使うため、電源は切れない。
 - **POWER はトグル**。`is_on` を読めた時、かつ True の時だけ送る。状態が確定できない時（接続失敗・`is_on` を読めない・MAC 不一致）は絶対に送らない。送信直前にも `is_on` を再確認し、送信後は新規接続で `is_on=False` を読み戻す。`KEYCODE_SLEEP` / `SOFT_SLEEP` はこの機種で無反応。
+- **Cast の音量の読みは当てにならなくなることがある**（2026-11-11 04:44〜04:59 の電源 OFF 中に Dell の Cast 音量が 0.52→0.00 に変わり、以後は電源が入って Android TV Remote の `volume_level` が 13 でも Cast は 0.0 のまま。nemucast はその間に音量を設定していない）。それ以前は Cast 音量と ATV の level が連動していた（0.48↔12、0.52↔13、ATV の max は 25 前後と見られる）ので、Cast 側の状態が OFF 中に初期化されて連動が切れたと見ている（原因の断定はしていない）。そのため音量源は毎 tick で選び直し、Cast が 0 以下なら ATV の level/max を正とする。
 - **音量の復元は読み戻しで確認してから電源を切る**。`cast.set_volume` は応答を待たず、復元の直後（約 0.1 秒）に POWER を送ると復元が反映されず、翌日点けた時の音量が 0 になった（2026-11-05 実機）。音量 0.23 のまま電源を切って点け直すと 0.23 が保たれる。
 - 電源が切れていても mDNS・6466・8009 は残る（数分は実測）。「見えない」は「切れている」の根拠にならない。電源は発見結果ではなく `is_on` で判断する。
 - 接続先は Cast の発見結果から毎回得る（IP 固定にしない）。見えない時は同名の前回 IP を使い、ペアリング時に記録したテレビの MAC と照合する。
@@ -71,6 +75,7 @@ Chromecast の active / idle 判定には依存せず、`前回自動設定し�
 | `src/nemucast/cli.py` | `nemucast`（手動実行）のエントリポイント、argparse、ロギング設定 |
 | `src/nemucast/standby.py` | `nemucast-standby` のエントリポイント。発見 → テレビ本体の電源OFF → 読み戻し確認。失敗は終了コード 1 + 通知 |
 | `src/nemucast/tv_power.py` | Android TV Remote v2 の電源制御（`is_on` を見て POWER → 新規接続で読み戻し）、証明書パス、IP キャッシュ |
+| `src/nemucast/tv_volume.py` | auto 専用の ATV 音量取得・MAC 照合・音量キー送信・新規接続の読み戻し |
 | `src/nemucast/tv_pair.py` | `nemucast-tv-pair`（初回ペアリング。PIN をファイル経由で受け取る） |
 | `src/nemucast/auto_standby.py` | `nemucast-auto` のエントリポイント。1 tick 分の最小ロジック（下げる / 電源OFF / 何もしない） |
 | `src/nemucast/config.py` | 環境変数から読み込む設定定数 |
@@ -113,7 +118,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 
 | コマンド | 用途 | 主な設定 |
 |----------|------|----------|
-| `nemucast-auto` | Dell の視聴中（ペア済みの点灯またはアプリ起動中）にローカル時刻 21:00〜06:00 に 15 分間隔で音量を下げ、元音量へ復元して電源 OFF を試す。未ペアリングは `quit_app` と日次通知まで | `AUTO_TARGET_NAME=Dell`, `AUTO_POWER_OFF_ALERT_FILE=logs/auto_power_off_alert_state.json`, `AUTO_NIGHT_START=21:00`, `AUTO_NIGHT_END=06:00`, `AUTO_NIGHT_FORCE=0`, `AUTO_RESTORE_VOLUME=1`, `AUTO_RESTORE_WAIT_SEC=5`, `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800`, `DISCOVERY_ALERT_COMMAND`（LAN 上 0 台が `DISCOVERY_ALERT_AFTER_TICKS=2` 回続いたら終了コード 2 と通知、回復時も 1 回通知） |
+| `nemucast-auto` | Dell の視聴中（ペア済みの点灯またはアプリ起動中）にローカル時刻 21:00〜06:00 に 15 分間隔で音量を下げ、元音量へ復元して電源 OFF を試す。未ペアリングは `quit_app` と日次通知まで | `AUTO_TARGET_NAME=Dell`, `AUTO_POWER_OFF_ALERT_FILE=logs/auto_power_off_alert_state.json`, `AUTO_NIGHT_START=21:00`, `AUTO_NIGHT_END=06:00`, `AUTO_NIGHT_FORCE=0`, `AUTO_RESTORE_VOLUME=1`, `AUTO_RESTORE_WAIT_SEC=5`, `AUTO_ATV_VOLUME_WAIT_SEC=5`, `AUTO_VOLUME_ALERT_FILE=logs/auto_volume_alert_state.json`, `AUTO_MIN_LEVEL=0.05`, `AUTO_LOWERED_THRESHOLD=3`, `AUTO_STATE_FILE=logs/auto_standby_state.json`, `AUTO_STATE_STALE_SEC=1800`, `DISCOVERY_ALERT_COMMAND`（LAN 上 0 台が `DISCOVERY_ALERT_AFTER_TICKS=2` 回続いたら終了コード 2 と通知、回復時も 1 回通知） |
 | `nemucast-standby` | 20:00 の即 OFF 用。テレビ本体の電源を切り、読み戻して確認する。音量制御も state も持たない。失敗は exit 1 + `DISCOVERY_ALERT_COMMAND` | `CHROMECAST_NAME`, `TV_CERT_DIR`, `TV_POWER_*` |
 | `nemucast` | 手動デバッグ用。1回の tick 実行または `--run-until-standby` で継続実行 | `INTERVAL_SEC=1200`, `INACTIVE_THRESHOLD=3`, `STATE_FILE=logs/activity_state.json` |
 
@@ -125,9 +130,11 @@ state を持つのは `nemucast-auto` と `nemucast`（手動）の 2 つで、�
 
 | キー | 意味 |
 |------|------|
-| `last_lowered_to` | 直近で自動設定した音量 |
+| `last_lowered_to` | 直近で自動設定した音量（cast は比率、atv は読み戻し済みの整数 level） |
+| `volume_source` | `cast` / `atv`。キーのない旧 state は `cast` として読む |
+| `volume_max` | atv の整数 max。cast では None |
 | `consecutive_lowered` | 連続で音量を下げた回数。`AUTO_LOWERED_THRESHOLD` に達した tick で対象の電源 OFF を試す（未ペアリングは `quit_app`） |
-| `original_volume` | セッション開始時の音量。手動上昇時に更新。セッション終了・視聴終了・時間外の後始末時の復元用 |
+| `original_volume` | セッション開始時の音量（cast は比率、atv は整数 level）。手動上昇時に更新。セッション終了・視聴終了・時間外の後始末時の復元用 |
 | `updated_at` | 最終更新時刻（UNIX 秒） |
 
 `nemucast`（`logs/activity_state.json`）:
@@ -146,8 +153,8 @@ state を持つのは `nemucast-auto` と `nemucast`（手動）の 2 つで、�
 - 窓外でも `original_volume` があり state が stale でなければ通常制御を続行する。stale なら音量を復元して終了する
 - 目的名不在通知は `AUTO_NOT_FOUND_ALERT_FILE=logs/auto_not_found_alert_state.json` で管理し、窓内の不在が `AUTO_NOT_FOUND_ALERT_AFTER_TICKS=4` 回続いたら一度通知、回復も一度通知する。通知失敗時は次 tick で再送する。LAN 0 台検知とは別管理で、壊れたファイルは初期化する
 - 電源 OFF 不可の通知日（ローカル日付 YYYY-MM-DD）は `AUTO_POWER_OFF_ALERT_FILE=logs/auto_power_off_alert_state.json` に保存する。同日は一度まで、翌日は再通知し、通知失敗時は送信日を記録せず再送待ちだけ保持し、セッション終了後や窓外でも次 tick で再送する。ペアリング済みなら再送待ちを解除して送らない。壊れたファイルは未通知として扱う。
-- auto のログ語彙は `outside_window / not_watching / not_found / lowered / turned_off / power_off_unavailable / cleanup`（ペアリング後の OFF 時にすでに消灯なら `power_off` の戻り値 `already_off`）。毎 tick、接続・機器照合後に `対象機器の生値: device=... is_on=... app_id=... display_name=... is_idle=... is_stand_by=... is_active_input=... volume=...` を INFO で記録する。`app_id` / `display_name` は制御文字を escape し、各 64 文字以内に制限する。
-- 各機器処理の正常終了時に `tick 要約: device=Dell is_on=True app_id=None volume_before=0.44 volume_after=0.40 count=1 result=lowered` を INFO で 1 行出す。`grep "tick 要約" logs/auto_standby.log` で確認できる。`is_on` / `app_id` は操作前（未ペアの `is_on` は `None`）、音量は開始時と終了時の目標値（不明は `None`）。`count` はその tick の連続回数（`not_watching` / `cleanup` は初期化後の 0、OFF 結果は初期化前）。機器名・アプリ ID は制御文字を escape し、各 64 文字以内に制限する。
+- auto のログ語彙は `outside_window / not_watching / not_found / lowered / turned_off / power_off_unavailable / cleanup / volume_unavailable / volume_unchanged`（ペアリング後の OFF 時にすでに消灯なら `power_off` の戻り値 `already_off`）。毎 tick、接続・機器照合後に `対象機器の生値: device=... is_on=... app_id=... display_name=... is_idle=... is_stand_by=... is_active_input=... volume=... volume_source=cast|atv|none [atv_level=n/max]` を INFO で記録する。`app_id` / `display_name` は制御文字を escape し、各 64 文字以内に制限する。
+- 各機器処理の正常終了時に `tick 要約: device=Dell is_on=True app_id=None volume_before=0.44 volume_after=0.40 count=1 result=lowered volume_source=cast` を INFO で 1 行出す。`grep "tick 要約" logs/auto_standby.log` で確認できる。`is_on` / `app_id` は操作前（未ペアの `is_on` は `None`）、音量は開始時と終了時の目標値（cast は比率、atv は整数段、不明は `None`）。既存フィールドの後ろに `volume_source=cast|atv|none`、atv の時は最後に確認できた読み戻し値 `atv_level=n/max` を付けます。`count` はその tick の連続回数（`not_watching` / `cleanup` は初期化後の 0、OFF 結果は初期化前）。機器名・アプリ ID は制御文字を escape し、各 64 文字以内に制限する。
 - 発見一覧に目的名があるのに接続候補が空の時は `DISCOVERY_RETRY_WAIT_SEC=1` 秒待ち、初回に加えて最大 `DISCOVERY_MAX_RETRIES=3` 回再探索する
 
 ## 環境変数

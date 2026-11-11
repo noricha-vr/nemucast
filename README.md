@@ -86,8 +86,12 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 
 1. 時間外は新しいセッションを開始しません。`original_volume` があり、最終更新から `AUTO_STATE_STALE_SEC` 以内なら通常どおり下げ・復元・電源 OFF まで続行します。stale なセッションは発見・接続・機器照合後、アプリの有無によらず音量を戻して state を初期化します。手動で前回の設定値より音量を上げていた場合は、その音量を保ちます。接続・照合できなければ警告して次 tick で再試行します。
 2. Cast を発見し、`cast.wait` の後、ペアリング済みなら `read_power_state` で MAC を照合します。不一致や接続失敗時は、音量・生値ログ・アプリ判定より前に中断します（未ペアリング時は名前のみで選び、MAC を照合できません）。照合時に読んだ `is_on=True`、または status があり `app_id` が None・空文字・pychromecast の `IDLE_APP_ID`（Backdrop）以外なら視聴中です。追加の電源状態接続は行いません。未ペアリングはアプリ起動中だけで判定します。`is_on=False` でもアプリ起動中なら制御します。`is_idle`・`is_stand_by`・`is_active_input`・`player_state` は判定に使いません。どちらも満たさない時だけ `not_watching` と記録し、元音量が残っていれば時間外と同じ手順で復元し、state を初期化して終了します。
+音量源は有効な正の Cast 音量なら `cast`、Cast が 0 以下（許容誤差 `1e-6`）・未受信・不正値で、ペアリング済みかつ MAC 照合後の ATV 音量（整数 `level`、`max>0`）が取れた時だけ `atv` です。ATV の 1 tick の下げ幅は `max(1, round(-STEP * max))` 段、下限は `max(1, ceil(AUTO_MIN_LEVEL * max))` 段とし、下限より小さい現在音量は上げません。各キーの送信後に新規接続・MAC 照合で読み戻し、その接続を次のキーに使います。実際に下がらなければ `volume_unchanged` としてカウントを据え置きます。ATV の手動上昇は `level > last_lowered_to + MANUAL_RISE_THRESHOLD * max` で判定し、通常制御では元音量を更新して数え直し、後始末では復元しません。復元は差分の `VOLUME_UP` と各キーの読み戻しで確認し、元音量との差が 1 段以内を成功とします。OFF 前の復元失敗は WARNING で OFF を優先し、後始末の復元失敗は state を保持します。音量源または ATV の max が変わったら単位を混ぜずセッションを初期化します。
+
+必要な音量がどちらからも取れない時は `volume_unavailable` を WARNING と tick 要約に記録し、カウント・復元情報を保持して音量操作も電源 OFF もしません。通知は `AUTO_VOLUME_ALERT_FILE=logs/auto_volume_alert_state.json` にローカル日付の成功日を保存し、同日 1 回まで（失敗時は失敗が続く次 tick で再送）。視聴しておらず復元情報もない時は従来どおり `not_watching` で終了します。
+
 3. 視聴中（ペア済みの点灯またはアプリ起動中）だけ音量を `STEP` ずつ下げます。最初の音量を `original_volume` に保存します。前回の設定値より手動で音量が上がったら、連続カウントをリセットし、元の音量もその値に更新します。
-4. 下限 `AUTO_MIN_LEVEL` 以下なら音量を変えずカウントだけ進めます。既定では **3 回目の tick で閾値に達し、その tick 内で電源 OFF を試します**（21:00 に開始すれば 21:15、21:30 と進み、21:30 に OFF 試行）。
+4. 有効な音量が下限 `AUTO_MIN_LEVEL`（ATV は換算した下限段）以下なら音量を変えずカウントだけ進めます。既定では **3 回目の tick で閾値に達し、その tick 内で電源 OFF を試します**（21:00 に開始すれば 21:15、21:30 と進み、21:30 に OFF 試行）。
 5. 切る直前に `original_volume` へ音量を戻し、読み戻しで確認します。ペアリング済み（名前に対応する MAC 登録あり）なら Android TV Remote の `power_off` を実行します。POWER は `is_on=True` の時だけ送り、新規接続で OFF を読み戻します。失敗時はカウントと元音量を保持し、通知・終了コード 1 として次 tick で再試行します。
 6. 未ペアリングなら `quit_app` を試します。失敗しても WARNING を記録して続行し、`power_off_unavailable` とペアリング方法をログと通知で知らせます。通知はローカル日付で 1 日 1 回まで、翌日は再通知し、通知失敗時は送信済み日を記録せず再送待ちだけを保持し、アプリ終了後や窓外でも次 tick で再送します。ペアリング済みになったら再送待ちを解除し、送信しません。壊れた通知ファイルは未通知として扱います。OFF 成功時と未ペアリングの分岐後は state を初期化します。Dell の初回・再ペアリング手順は `nemucast-tv-pair --name Dell --pin-file <PIN を書くファイル> --need-file <PIN 要求を書くファイル>` です。
 
@@ -100,7 +104,9 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 | `AUTO_NIGHT_FORCE` | `1` なら時間帯を無視して動作。昼間の試験用 | `0` |
 | `AUTO_RESTORE_VOLUME` | `1` なら電源 OFF 直前に元の音量へ戻す。時間外の後始末ではこの設定にかかわらず戻す | `1` |
 | `AUTO_RESTORE_WAIT_SEC` | 音量復元後、テレビが反映した値を読み戻して確かめる待ち時間（秒）。`set_volume` は応答を待たず、反映前に電源を切ると翌日の音量が 0 になった（実機）ため、確認してから電源を切る。確認できなくても電源OFFは続行し WARNING を出す | `5` |
-| `AUTO_RESTORE_TOLERANCE` | 読み戻しの許容差 | `0.015` |
+| `AUTO_RESTORE_TOLERANCE` | Cast 読み戻しの許容差（ATV は 1 段以内） | `0.015` |
+| `AUTO_ATV_VOLUME_WAIT_SEC` | ATV 音量の初回 push とキー送信後の更新通知を待つ秒数 | `5` |
+| `AUTO_VOLUME_ALERT_FILE` | 音量取得不可の通知成功日と再送待ち | `logs/auto_volume_alert_state.json` |
 | `AUTO_LOWERED_THRESHOLD` | 電源 OFF までの連続下げ回数 | `3` |
 | `AUTO_MIN_LEVEL` | 下限音量 | `0.05` |
 | `AUTO_STATE_FILE` | 自動制御の state 保存先 | `logs/auto_standby_state.json` |
@@ -117,8 +123,8 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 
 - 対象 Cast だけが見つからない時は正常終了します。窓内で不在が既定 4 tick 続いたら一度だけ通知し、発見できたら回復も一度通知します。通知失敗時は次 tick で再送します。未通知の連続回数は stale でリセットし、通知済みの途切れは回復まで保持します。窓外では不在・回復とも記録を更新しません。LAN 全体で 0 台が続いた時は従来どおり ERROR・終了コード 2 とし、障害確定時と回復時に 1 回ずつ通知します。夜間窓の中だけこの検知を行います。
 - launchd 配下では、そのプロセスに macOS の「プライバシーとセキュリティ > ローカルネットワーク」の許可が必要です。
-- 音量に触れず視聴中の判定が続く場合も、夜間窓の中では 3 tick で電源 OFF を試します。mDNS・CEC 値は視聴中の判定に使いません。ペアリング後に実際の電源を切る時は `power_off` 内で `is_on` を確認します。
-- stale な state は連続カウントを捨てますが、復元用 `original_volume` は保持します。すでに閾値に達した電源 OFF の再試行も保持します。旧 `powered_off` / `volume_at_power_off` は使用しません。壊れた JSON は作り直して続行し、保存は一時ファイルと置き換えで行います。
+- 音量に触れず視聴中の判定が続く場合も、夜間窓の中では有効な音量を下げた（または実際に下限以下の）3 tick で電源 OFF を試します。mDNS・CEC 値は視聴中の判定に使いません。ペアリング後に実際の電源を切る時は `power_off` 内で `is_on` を確認します。
+- stale な state は連続カウントを捨てますが、復元用 `original_volume` は保持します。すでに閾値に達した電源 OFF の再試行も保持します。`volume_source` のない旧 state は Cast 比率として読みます。ATV は `volume_max`、整数の `original_volume` と `last_lowered_to` を持ちます。旧 `powered_off` / `volume_at_power_off` は使用しません。壊れた JSON は作り直して続行し、保存は一時ファイルと置き換えで行います。
 
 ### 2 つの運用と止め方
 
@@ -161,12 +167,18 @@ flowchart TD
     Identity -->|成功・未ペアリング| Watching{ペア済みの is_on=True またはアプリ起動中?}
     Identity -->|失敗| Fail
     Watching -->|No| RestoreCleanup
-    Watching -->|Yes| Pending{電源OFFの再試行待ち?}
+    Watching -->|Yes| Volume{有効な Cast または MAC 照合済み ATV 音量?}
+    Volume -->|No| Unavailable[volume_unavailable・日次通知・count と復元情報を保持]
+    Unavailable --> End
+    Volume -->|Yes| Pending{電源OFFの再試行待ち?}
     Pending -->|No| Manual{手動音量上昇?}
     Manual -->|Yes| Reset[カウントをリセット・original_volume 更新]
     Manual -->|No| Lower
-    Reset --> Lower[初回の音量保存・STEP 分下げる・count 加算]
-    Lower --> Save[state 保存]
+    Reset --> Lower[初回の音量保存・STEP 分下げる]
+    Lower --> Changed{音量低下確認または実際に下限以下?}
+    Changed -->|No| Unchanged[volume_unchanged・カウント据え置き]
+    Unchanged --> End
+    Changed -->|Yes| Save[count 加算・state 保存]
     Save --> Threshold{count が閾値以上?}
     Threshold -->|No| End
     Pending -->|Yes| Restore
@@ -193,13 +205,14 @@ flowchart TD
 ## 📝 ログと state
 
 - 即時 standby ログ: `logs/standby.log`
-- 自動寝かしつけログ: `logs/auto_standby.log`。`tick 結果: lowered / outside_window / cleanup / not_watching / turned_off / not_found / power_off_unavailable` と音量復元・カウントを記録します。接続・機器照合後は毎 tick、`対象機器の生値: device=... is_on=... app_id=... display_name=... is_idle=... is_stand_by=... is_active_input=... volume=...` を INFO に 1 行出します。`app_id` / `display_name` は制御文字を escape し、各 64 文字以内に制限します。ペアリング後の OFF 試行時にすでに消灯なら `power_off` の戻り値 `already_off` も記録します
+- 自動寝かしつけログ: `logs/auto_standby.log`。`tick 結果: lowered / outside_window / cleanup / not_watching / turned_off / not_found / power_off_unavailable / volume_unavailable / volume_unchanged` と音量復元・カウントを記録します。接続・機器照合後は毎 tick、`対象機器の生値: device=... is_on=... app_id=... display_name=... is_idle=... is_stand_by=... is_active_input=... volume=... volume_source=cast|atv|none [atv_level=n/max]` を INFO に 1 行出します。`app_id` / `display_name` は制御文字を escape し、各 64 文字以内に制限します。ペアリング後の OFF 試行時にすでに消灯なら `power_off` の戻り値 `already_off` も記録します
 - 確認例: `rg "tick 結果:|tick 要約:|対象機器の生値:|音量復元|power_off_unavailable|ERROR" logs/auto_standby.log`。初回の夜間運転後、復元が OFF 確認より前に出ていること、窓の外で新規セッションが始まっていないこと（進行中なら `lowered` は正常）を確認します
-- 各機器処理の正常終了時に `tick 要約:` を 1 行出します。`grep "tick 要約" logs/auto_standby.log` で、操作前の `is_on` / `app_id`、`volume_before`（開始音量）/ `volume_after`（終了時の目標音量）、`count`、`result` を確認できます。未ペアの `is_on` と不明な音量は `None` です。音量を変えなければ前後は同値です。`count` はその tick の連続回数で、`not_watching` / `cleanup` は初期化後の 0、OFF 結果は初期化前の回数です。
+- 各機器処理の正常終了時に `tick 要約:` を 1 行出します。`grep "tick 要約" logs/auto_standby.log` で、操作前の `is_on` / `app_id`、`volume_before`（開始音量）/ `volume_after`（終了時の目標音量）、`count`、`result`、`volume_source` を確認できます。ATV の音量は整数段で、末尾の `atv_level=n/max` は最後に確認できた読み戻し値です。未ペアの `is_on` と不明な音量は `None` です。音量を変えなければ前後は同値です。`count` はその tick の連続回数で、`not_watching` / `cleanup` は初期化後の 0、OFF 結果は初期化前の回数です。
 - 手動実行ログ: `logs/lower_cast_volume.log`
 - state:
   - `nemucast-auto` → `logs/auto_standby_state.json`
   - 目的名不在通知 → `logs/auto_not_found_alert_state.json`（LAN 0 台検知は `logs/discovery_alert_state.json`）
+  - 音量取得不可の通知成功日 → `logs/auto_volume_alert_state.json`
   - 電源 OFF 不可の通知日 → `logs/auto_power_off_alert_state.json`
   - `nemucast`（手動） → `logs/activity_state.json`
 
