@@ -1779,6 +1779,102 @@ def test_pending_restore_only_at_untouched_level(atv_rig: Mock, level: int, capl
     auto.power_off.assert_not_awaited()
 
 
+@pytest.mark.parametrize("keys_before_off", [1, 2])
+@pytest.mark.parametrize("is_on,off_level", [(False, 0), (False, 1), (None, 1)])
+def test_pending_restore_power_loss_preserves_original_left_at(
+    atv_rig: Mock, keys_before_off: int, is_on: bool | None, off_level: int, caplog
+) -> None:
+    from nemucast import auto_standby as auto
+    from nemucast import tv_volume
+
+    pending_atv()
+    pending_before = auto.AUTO_PENDING_RESTORE_FILE.read_bytes()
+    atv_rig.level = 10
+    original_factory = tv_volume.AndroidTVRemote.side_effect
+
+    def factory(*args: Any) -> Mock:
+        remote = original_factory(*args)
+        if len(atv_rig.remotes) > keys_before_off:
+            connect = remote.async_connect.side_effect
+
+            async def connect_off() -> None:
+                await connect()
+                remote.is_on = is_on
+                remote.volume_info = {"level": off_level, "max": atv_rig.maximum}
+
+            remote.async_connect.side_effect = connect_off
+        return remote
+
+    tv_volume.AndroidTVRemote.side_effect = factory
+    with caplog.at_level(logging.INFO):
+        atv_rig.tick()
+    assert auto.AUTO_PENDING_RESTORE_FILE.read_bytes() == pending_before
+    state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+    assert state["last_lowered_to"] is None
+    assert state["original_volume"] is None
+    assert state["consecutive_lowered"] == 0
+    keys = [event[0] for event in atv_rig.events if event[0].startswith("VOLUME_")]
+    assert keys == ["VOLUME_UP"] * keys_before_off
+    assert len(atv_rig.remotes) == keys_before_off + 1
+    auto.read_power_state.assert_awaited_once()
+    auto.power_off.assert_not_awaited()
+    assert "音量復元を読み戻しで確認できませんでした" in caplog.text
+    assert "result=restore_pending" in caplog.text
+
+
+@pytest.mark.parametrize("is_on", [False, None])
+def test_pending_restore_power_loss_before_next_key_preserves_left_at(
+    atv_rig: Mock, monkeypatch: pytest.MonkeyPatch, is_on: bool | None, caplog
+) -> None:
+    from nemucast import auto_standby as auto
+    from nemucast.tv_volume import AtvVolume, AtvVolumeControl
+
+    pending_atv()
+    pending_before = auto.AUTO_PENDING_RESTORE_FILE.read_bytes()
+    atv_rig.level = 10
+    original_read = AtvVolumeControl.read
+
+    async def read_then_off(control: AtvVolumeControl) -> AtvVolume:
+        volume = await original_read(control)
+        if len(atv_rig.remotes) == 2:
+            control.remote.is_on = is_on
+        return volume
+
+    monkeypatch.setattr(AtvVolumeControl, "read", read_then_off)
+    with caplog.at_level(logging.INFO):
+        atv_rig.tick()
+    assert auto.AUTO_PENDING_RESTORE_FILE.read_bytes() == pending_before
+    assert atv_rig.level == 11
+    assert [event[0] for event in atv_rig.events] == ["READ", "VOLUME_UP", "READ"]
+    assert "result=restore_pending" in caplog.text
+    assert "音量復元を読み戻しで確認できませんでした" in caplog.text
+    auto.power_off.assert_not_awaited()
+
+
+@pytest.mark.parametrize("cast_volume", [0.2, 0.5])
+@pytest.mark.parametrize("stuck", [False, True])
+def test_pending_restore_precedes_positive_cast_volume(
+    atv_rig: Mock, cast_volume: float, stuck: bool, caplog
+) -> None:
+    from nemucast import auto_standby as auto
+
+    pending_atv()
+    atv_rig.level = 10
+    atv_rig.cast.status.volume_level = cast_volume
+    atv_rig.stuck = stuck
+    with caplog.at_level(logging.INFO):
+        atv_rig.tick()
+    assert atv_rig.level == (10 if stuck else 13)
+    atv_rig.cast.set_volume.assert_not_called()
+    auto.power_off.assert_not_awaited()
+    assert not [event for event in atv_rig.events if event[0] == "VOLUME_DOWN"]
+    state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+    assert state["consecutive_lowered"] == 0
+    assert state["original_volume"] is None
+    assert (auto.load_pending_restore("Dell") is not None) == stuck
+    assert f"result={'restore_pending' if stuck else 'restored'}" in caplog.text
+
+
 @pytest.mark.parametrize("cleanup,is_on", [(False, False), (True, False), (True, True)])
 def test_cleanup_and_off_never_send_keys_or_trust_off_volume(
     atv_rig: Mock, cleanup: bool, is_on: bool, caplog
