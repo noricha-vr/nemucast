@@ -235,6 +235,26 @@ def test_off_observed_then_on_again_never_resends(monkeypatch, caplog) -> None:
     readback.disconnect.assert_called_once()
 
 
+@pytest.mark.parametrize("off_observed", [True, False])
+def test_readback_failure_preserves_off_observation(monkeypatch, off_observed: bool) -> None:
+    """読み戻し失敗時も OFF 観測の有無を呼び出し側で区別できる。"""
+    remote = Mock(is_on=True)
+    failure = TvPowerError("readback lost")
+    reader = AsyncMock(side_effect=[(remote, True), failure])
+    monkeypatch.setattr(tv_power, "_read_is_on", reader)
+    monkeypatch.setattr(tv_power, "_wait_off", AsyncMock(return_value=off_observed))
+    with pytest.raises(TvPowerError) as caught:
+        asyncio.run(power_off("h"))
+    if off_observed:
+        assert getattr(caught.value, "off_observed", False) is True
+        assert caught.value.__cause__ is failure
+    else:
+        assert caught.value is failure
+    assert reader.await_count == 2
+    remote.send_key_command.assert_called_once()
+    remote.disconnect.assert_called_once()
+
+
 def test_no_off_observed_retries_only_after_extra_read(monkeypatch, caplog) -> None:
     first, check, retry, final = [Mock(is_on=value) for value in (True, True, True, False)]
     reader = AsyncMock(side_effect=[(first, True), (check, True), (retry, True), (final, False)])

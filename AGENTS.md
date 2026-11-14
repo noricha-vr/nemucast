@@ -135,6 +135,7 @@ state を持つのは `nemucast-auto` と `nemucast`（手動）の 2 つで、�
 | `last_lowered_to` | 直近で自動設定した音量（cast は比率、atv は読み戻し済みの整数 level） |
 | `volume_source` | `cast` / `atv`。キーのない旧 state は `cast` として読む |
 | `volume_max` | atv の整数 max。cast では None |
+| `atv_lowering` | ATV 下降キー送信前の範囲 `{ "from": 現在段, "to": 目標段 }`。通常・成功後は None、旧 state の欠落も None。読み戻し失敗後の現在段が両端を含む範囲内なら自分の下降として last のみ更新し、その tick は音量操作・count 加算をしない。範囲外は手動変更 |
 | `consecutive_lowered` | 段階制御の連続 tick 数。`AUTO_LOWERED_THRESHOLD` に達した tick で対象の電源 OFF を試す（ATV の最終 tick は音量キーなし）（未ペアリングは `quit_app`） |
 | `original_volume` | セッション開始時の音量（cast は比率、atv は整数 level）。ATV は上下どちらの手動変更でも更新。ATV の後始末・OFF 時は別ファイルへ保留する復元用（Cast は従来の復元） |
 | `updated_at` | 最終更新時刻（UNIX 秒） |

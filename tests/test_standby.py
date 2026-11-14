@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nemucast import standby
-from nemucast.tv_power import TvPowerError
+from nemucast.tv_power import PowerOffUnconfirmedError, TvPowerError
 
 
 def _fake_discovery(host: str | None) -> tuple[object, MagicMock]:
@@ -68,9 +68,12 @@ class TestMain:
         assert exc.value.code == 1
         assert "Missing" in alert.call_args.args[0]
 
-    def test_power_off_failure_exits_nonzero_and_alerts(self) -> None:
+    @pytest.mark.parametrize(
+        "error", [TvPowerError("切れない"), PowerOffUnconfirmedError("不明", off_observed=True)]
+    )
+    def test_power_off_failure_exits_nonzero_and_alerts(self, error: TvPowerError) -> None:
         async def boom(host: str, expected_mac: str | None = None) -> str:
-            raise TvPowerError("切れない")
+            raise error
 
         with (
             patch.object(standby, "resolve_host", return_value="10.0.0.5"),

@@ -32,6 +32,14 @@ class TvPowerError(Exception):
     """テレビの電源を切れなかった、または状態を確認できなかった。"""
 
 
+class PowerOffUnconfirmedError(TvPowerError):
+    """POWER 後の読み戻し失敗。送信接続での OFF 観測を保持する。"""
+
+    def __init__(self, message: str, *, off_observed: bool) -> None:
+        super().__init__(message)
+        self.off_observed = off_observed
+
+
 def cert_paths() -> tuple[Path, Path]:
     """クライアント証明書と秘密鍵のパスを返す。"""
     return TV_CERT_DIR / "tv_cert.pem", TV_CERT_DIR / "tv_key.pem"
@@ -168,6 +176,7 @@ async def power_off(host: str, expected_mac: str | None = None) -> str:
         expected_mac: ペアリング時に記録した MAC。指定時は送信前に照合する。
 
     Raises:
+        PowerOffUnconfirmedError: OFF は観測したが、新規接続で状態を確認できない。
         TvPowerError: 接続できない・状態を読めない・リトライしても切れない。
     """
     if expected_mac is not None:
@@ -218,7 +227,12 @@ async def _power_off_attempts(host: str, remote: AndroidTVRemote) -> str:
         sent_off = await _send_power(remote)
         logging.info("POWER 送信後: attempt=%d sent_off=%s", attempt, sent_off)
         await asyncio.sleep(RECHECK_DELAY_SEC)
-        remote, is_on = await _read_is_on(host)
+        try:
+            remote, is_on = await _read_is_on(host)
+        except TvPowerError as exc:
+            if sent_off:
+                raise PowerOffUnconfirmedError(str(exc), off_observed=True) from exc
+            raise
         logging.info("POWER 読み戻し: attempt=%d sent_off=%s is_on=%s", attempt, sent_off, is_on)
         if is_on is False:
             remote.disconnect()

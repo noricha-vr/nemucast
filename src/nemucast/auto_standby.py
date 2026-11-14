@@ -49,7 +49,13 @@ from nemucast.config import (
     MANUAL_RISE_THRESHOLD,
     STEP,
 )
-from nemucast.tv_power import TvPowerError, load_identity, power_off, read_power_state
+from nemucast.tv_power import (
+    PowerOffUnconfirmedError,
+    TvPowerError,
+    load_identity,
+    power_off,
+    read_power_state,
+)
 from nemucast.tv_volume import (
     ATV_MIN_LEVEL,
     ATV_RESTORE_TOLERANCE,
@@ -86,6 +92,7 @@ def fresh_state(device_name: str) -> dict[str, Any]:
         "original_volume": None,
         "volume_source": "cast",
         "volume_max": None,
+        "atv_lowering": None,
         "updated_at": time.time(),
     }
 
@@ -117,6 +124,15 @@ def valid_session_state(data: dict[str, Any]) -> bool:
             if type(value) is not int or not 0 <= value <= maximum:
                 return False
         elif type(value) not in (int, float) or not 0 <= value <= 1:
+            return False
+    lowering = data.get("atv_lowering")
+    if lowering is not None:
+        if source != "atv" or not isinstance(lowering, dict):
+            return False
+        start, target = lowering.get("from"), lowering.get("to")
+        if type(start) is not int or type(target) is not int:
+            return False
+        if not 0 <= target < start <= maximum:
             return False
     return True
 
@@ -431,13 +447,36 @@ def prepare_volume_state(state: dict[str, Any], source: str, maximum: int | None
     state.update(volume_source=source, volume_max=maximum)
 
 
+def reconcile_atv_lowering(state: dict[str, Any], current: int) -> bool:
+    """読み戻せなかった自分の下降範囲なら、復元先と count を保って実値を採用する。"""
+    lowering = state.get("atv_lowering")
+    if lowering is None:
+        return False
+    state["atv_lowering"] = None
+    if not lowering["to"] <= current <= lowering["from"]:
+        return False
+    state["last_lowered_to"] = current
+    logging.info(
+        "ATV 下降途中の読み戻しを回復: from=%d to=%d current=%d count=%d",
+        lowering["from"],
+        lowering["to"],
+        current,
+        state["consecutive_lowered"],
+    )
+    return True
+
+
 async def run_atv_tick(control: AtvVolumeControl, state: dict[str, Any]) -> TickResult:
     """整数段で下げ、実際に下がった tick または確認済みの下限だけを数える。"""
     current = control.volume.level
     maximum = control.volume.maximum
+    lowering = state.get("atv_lowering")
+    if reconcile_atv_lowering(state, current):
+        # 復旧 tick は実値の確定だけを行い、二重に下降・カウントしない。
+        return TickResult.VOLUME_UNCHANGED
     last = state.get("last_lowered_to")
-    if last is not None and current != last:
-        logging.info("手動音量変更: previous=%d current=%d volume_source=atv", last, current)
+    if lowering is not None or (last is not None and current != last):
+        logging.info("手動音量変更: previous=%s current=%d volume_source=atv", last, current)
         discard_pending_restore("manual_volume")
         state.update(consecutive_lowered=0, original_volume=current)
     if state["consecutive_lowered"] >= AUTO_LOWERED_THRESHOLD:
@@ -454,7 +493,10 @@ async def run_atv_tick(control: AtvVolumeControl, state: dict[str, Any]) -> Tick
     steps = max(ATV_MIN_LEVEL, round(-STEP * maximum))
     target = min(current, max(minimum, current - steps))
     if target < current:
+        state["atv_lowering"] = {"from": current, "to": target}
+        save_state(AUTO_STATE_FILE, state)
         after = await control.move_to(target)
+        state["atv_lowering"] = None
         if after.level >= current:
             logging.warning("ATV 音量低下を確認できないためカウントを進めません")
             return TickResult.VOLUME_UNCHANGED
@@ -642,6 +684,9 @@ def atv_branch(state: dict[str, Any], is_on: bool | None, level: int, *, cleanup
     """通常処理・人の変更・OFF 再試行・保留復元を区別する。"""
     if cleanup or is_on is not True:
         return "cleanup" if cleanup else "not_watching"
+    lowering = state.get("atv_lowering")
+    if lowering is not None:
+        return "normal" if lowering["to"] <= level <= lowering["from"] else "restart_manual"
     last = state.get("last_lowered_to")
     if state["consecutive_lowered"] >= AUTO_LOWERED_THRESHOLD:
         return "restart_manual" if last is not None and level != last else "pending_retry"
@@ -662,8 +707,13 @@ async def execute_atv_tick(
 ) -> tuple[str, int]:
     """点灯確認済みの通常 tick 以外では音量を下げず、OFF 前にも復元しない。"""
     if cleanup or is_on is not True:
+        lowering = state.get("atv_lowering")
+        recovered = reconcile_atv_lowering(state, control.volume.level)
         last = state.get("last_lowered_to")
-        if is_on is True and last is not None and control.volume.level != last:
+        manual = (lowering is not None and not recovered) or (
+            last is not None and control.volume.level != last
+        )
+        if is_on is True and manual:
             discard_pending_restore("manual_volume")
         else:
             defer_atv_restore(name, state, cleanup=True)
@@ -685,7 +735,13 @@ async def execute_atv_tick(
         return result.value, count
     defer_atv_restore(name, state)
     control.disconnect()
-    outcome = await power_off(cast.cast_info.host, control.expected_mac)
+    try:
+        outcome = await power_off(cast.cast_info.host, control.expected_mac)
+    except PowerOffUnconfirmedError as exc:
+        if not exc.off_observed:
+            raise
+        logging.info("OFF 観測後の状態が不明のため、点け直しの可能性を優先して終了: %s", exc)
+        outcome = "turned_on_again"
     save_state(AUTO_STATE_FILE, fresh_state(name))
     return ("woken" if outcome == "turned_on_again" else outcome), count
 

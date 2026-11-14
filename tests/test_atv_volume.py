@@ -440,6 +440,36 @@ def test_power_failure_propagates_and_retries_without_lowering(rig: Mock) -> Non
     assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["original_volume"] is None
 
 
+def test_off_observed_readback_failure_resets_without_alert_or_repeat_power(
+    rig: Mock, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """OFF 観測後の切断では閾値を持ち越さず、同じ音量で点け直しても再消灯しない。"""
+    from nemucast import tv_power
+
+    seed_atv(count=3, original=13, last=10)
+    rig.level = 10
+    remote = Mock(is_on=True)
+    reader = AsyncMock(side_effect=[(remote, True), TvPowerError("readback lost")])
+    monkeypatch.setattr(tv_power, "read_mac", AsyncMock(return_value="aa:bb"))
+    monkeypatch.setattr(tv_power, "_read_is_on", reader)
+    monkeypatch.setattr(tv_power, "_wait_off", AsyncMock(return_value=True))
+    monkeypatch.setattr(tv_power, "RECHECK_DELAY_SEC", 0)
+    monkeypatch.setattr(auto, "power_off", tv_power.power_off)
+    with caplog.at_level(logging.INFO):
+        rig.tick()
+    state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+    assert state["consecutive_lowered"] == 0
+    assert state["original_volume"] is None
+    assert auto.load_pending_restore("Dell")["level"] == 13
+    assert "result=woken" in caplog.text
+    auto.send_discovery_alert.assert_not_called()
+    rig.tick()
+    assert rig.level == 13
+    assert reader.await_count == 2
+    remote.send_key_command.assert_called_once()
+    assert auto.load_pending_restore("Dell") is None
+
+
 def test_volume_alert_retry_and_next_day(rig: Mock, monkeypatch: pytest.MonkeyPatch) -> None:
     rig.available = False
     clock = Mock()
@@ -527,6 +557,168 @@ def test_new_readback_loses_volume_preserves_original_without_off(rig: Mock) -> 
     assert rig.level == 12
     auto.power_off.assert_not_awaited()
     auto.send_discovery_alert.assert_called_once()
+
+
+@pytest.mark.parametrize("keys_before_failure", [1, 2])
+def test_failed_lowering_readback_preserves_original_on_next_tick(
+    rig: Mock, monkeypatch: pytest.MonkeyPatch, keys_before_failure: int
+) -> None:
+    """13 → 12 の次に自分で下げた 11/10 を、次 tick で手動変更と誤認しない。"""
+    seed_atv(original=13, last=12)
+    rig.level = 12
+    monkeypatch.setattr(auto, "STEP", -0.1)  # 目標 9、途中 11/10 で読み戻し失敗。
+    original_factory = tv_volume.AndroidTVRemote.side_effect
+
+    def fail_readback(*args: Any) -> Mock:
+        if len(rig.remotes) == keys_before_failure:
+            rig.connect_error = tv_volume.CannotConnect()
+        return original_factory(*args)
+
+    tv_volume.AndroidTVRemote.side_effect = fail_readback
+    rig.tick()
+    state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+    assert state["atv_lowering"] == {"from": 12, "to": 9}
+    assert (state["original_volume"], state["last_lowered_to"], state["consecutive_lowered"]) == (
+        13,
+        12,
+        1,
+    )
+    tv_volume.AndroidTVRemote.side_effect = original_factory
+    rig.connect_error = None
+    events = len(rig.events)
+    rig.tick()
+    state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+    assert (state["original_volume"], state["last_lowered_to"], state["consecutive_lowered"]) == (
+        13,
+        12 - keys_before_failure,
+        1,
+    )
+    assert state["atv_lowering"] is None
+    assert not [event for event in rig.events[events:] if event[0].startswith("VOLUME_")]
+    auto.power_off.assert_not_awaited()
+    rig.tick()
+    assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["original_volume"] == 13
+    assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["consecutive_lowered"] == 2
+
+
+@pytest.mark.parametrize("current", [9, 10, 12])
+def test_inflight_lowering_range_includes_both_endpoints(rig: Mock, current: int) -> None:
+    state = seed_atv()
+    state["atv_lowering"] = {"from": 12, "to": 9}
+    auto.save_state(auto.AUTO_STATE_FILE, state)
+    rig.level = current
+    rig.tick()
+    state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+    assert state["original_volume"] == 13
+    assert state["last_lowered_to"] == current
+    assert state["consecutive_lowered"] == 1
+    assert state["atv_lowering"] is None
+    assert not [event for event in rig.events if event[0].startswith("VOLUME_")]
+
+
+@pytest.mark.parametrize("current", [8, 14])
+def test_outside_inflight_range_is_manual_change(rig: Mock, current: int) -> None:
+    state = seed_atv()
+    state["atv_lowering"] = {"from": 12, "to": 9}
+    auto.save_state(auto.AUTO_STATE_FILE, state)
+    rig.level = current
+    rig.tick()
+    state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+    assert state["original_volume"] == current
+    assert state["consecutive_lowered"] == 1
+    assert state["atv_lowering"] is None
+
+
+@pytest.mark.parametrize("cleanup", [True, False])
+def test_inflight_lowering_cleanup_preserves_restore(rig: Mock, cleanup: bool) -> None:
+    state = seed_atv()
+    state["atv_lowering"] = {"from": 12, "to": 9}
+    auto.save_state(auto.AUTO_STATE_FILE, state)
+    rig.level = 11
+    if not cleanup:
+        auto.read_power_state.return_value = None
+    rig.tick(cleanup=cleanup)
+    assert auto.load_pending_restore("Dell")["level"] == 13
+    assert auto.load_pending_restore("Dell")["left_at"] == 11
+    assert not [event for event in rig.events if event[0].startswith("VOLUME_")]
+
+
+def test_lowering_range_is_saved_before_key_and_cleared_on_success(rig: Mock) -> None:
+    original_factory = tv_volume.AndroidTVRemote.side_effect
+
+    def factory(*args: Any) -> Mock:
+        remote = original_factory(*args)
+        original_send = remote.send_key_command.side_effect
+
+        def send(key: str) -> None:
+            state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+            assert state["atv_lowering"] == {"from": 13, "to": 12}
+            original_send(key)
+
+        remote.send_key_command.side_effect = send
+        return remote
+
+    tv_volume.AndroidTVRemote.side_effect = factory
+    rig.tick()
+    assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["atv_lowering"] is None
+
+
+@pytest.mark.parametrize(
+    "lowering",
+    [
+        True,
+        [],
+        {},
+        {"from": 12},
+        {"from": True, "to": 9},
+        {"from": 12, "to": 9.0},
+        {"from": 31, "to": 9},
+        {"from": 12, "to": -1},
+        {"from": 9, "to": 12},
+        {"from": 12, "to": 12},
+    ],
+)
+def test_invalid_inflight_lowering_state_rejected(rig: Mock, lowering: Any) -> None:
+    state = seed_atv()
+    state["atv_lowering"] = lowering
+    auto.AUTO_STATE_FILE.write_text(json.dumps(state))
+    assert auto.load_state(auto.AUTO_STATE_FILE, "Dell") is None
+
+
+def test_cast_state_rejects_atv_lowering_range(rig: Mock) -> None:
+    state = auto.fresh_state("Dell")
+    state["atv_lowering"] = {"from": 12, "to": 9}
+    assert not auto.valid_session_state(state)
+
+
+@pytest.mark.parametrize("last", [None, 12])
+def test_outside_inflight_range_is_manual_even_at_previous_last(
+    rig: Mock, last: int | None
+) -> None:
+    state = seed_atv(original=10)
+    state.update(last_lowered_to=last, atv_lowering={"from": 10, "to": 9})
+    auto.save_state(auto.AUTO_STATE_FILE, state)
+    rig.level = 12
+    rig.tick()
+    state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+    assert state["original_volume"] == 12
+    assert state["consecutive_lowered"] == 1
+    assert state["atv_lowering"] is None
+
+
+def test_lowering_range_save_failure_never_sends_key(rig: Mock, monkeypatch) -> None:
+    original_save = auto.save_state
+
+    def fail_range(path: Path, state: dict[str, Any], **kwargs: Any) -> None:
+        if state.get("atv_lowering") is not None:
+            raise OSError("range save failed")
+        original_save(path, state, **kwargs)
+
+    monkeypatch.setattr(auto, "save_state", fail_range)
+    with pytest.raises(OSError, match="range save failed"):
+        rig.tick()
+    assert not [event for event in rig.events if event[0].startswith("VOLUME_")]
+    auto.power_off.assert_not_awaited()
 
 
 def test_read_waits_for_delayed_initial_volume_push(rig: Mock) -> None:
