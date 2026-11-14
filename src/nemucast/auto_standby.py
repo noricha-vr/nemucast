@@ -191,8 +191,13 @@ def load_pending_restore(name: str) -> dict[str, Any] | None:
         return None
     volume = AtvVolume.parse({"level": data.get("level"), "max": data.get("max")})
     left = AtvVolume.parse({"level": data.get("left_at"), "max": data.get("max")})
+    left_min = AtvVolume.parse(
+        {"level": data.get("left_min", data.get("left_at")), "max": data.get("max")}
+    )
     created = data.get("created_at")
-    if volume is None or left is None or volume.level <= left.level:
+    if volume is None or left is None or left_min is None:
+        return None
+    if not left_min.level <= left.level <= volume.level or volume.level <= left_min.level:
         return None
     try:
         valid_created = type(created) in (int, float) and math.isfinite(created)
@@ -208,20 +213,30 @@ def defer_atv_restore(name: str, state: dict[str, Any], *, cleanup: bool = False
     original, last = state.get("original_volume"), state.get("last_lowered_to")
     if (not AUTO_RESTORE_VOLUME and not cleanup) or state.get("volume_source") != "atv":
         return
-    if original is None or last is None or original <= last:
+    lowering = state.get("atv_lowering")
+    if lowering is not None:
+        last, left_min = lowering["from"], lowering["to"]
+    else:
+        left_min = last
+    if original is None or last is None or original < last or original <= left_min:
         return
+    pending = {
+        "device_name": name,
+        "level": original,
+        "left_at": last,
+        "max": state["volume_max"],
+        "created_at": time.time(),
+    }
+    if lowering is not None:
+        pending["left_min"] = left_min
     save_state(
         AUTO_PENDING_RESTORE_FILE,
-        {
-            "device_name": name,
-            "level": original,
-            "left_at": last,
-            "max": state["volume_max"],
-            "created_at": time.time(),
-        },
+        pending,
         touch=False,
     )
-    logging.info("音量復元を保留: device=%s level=%s left_at=%s", name, original, last)
+    logging.info(
+        "音量復元を保留: device=%s level=%s left_at=%s left_min=%s", name, original, last, left_min
+    )
 
 
 def discard_pending_restore(reason: str) -> None:
@@ -522,6 +537,8 @@ async def restore_atv_volume(control: AtvVolumeControl, pending: dict[str, Any])
         logging.warning("音量復元を読み戻しで確認できませんでした: %s", exc)
         if not isinstance(exc, TvVolumePowerError) and control.volume.level < pending["level"]:
             pending["left_at"] = control.volume.level
+            if "left_min" in pending:
+                pending["left_min"] = control.volume.level
             save_state(AUTO_PENDING_RESTORE_FILE, pending, touch=False)
         return False
     logging.info("音量復元を読み戻しで確認: original_volume=%d volume_source=atv", pending["level"])
@@ -537,7 +554,8 @@ async def handle_pending_restore(name: str, control: AtvVolumeControl) -> str | 
     if pending["max"] != control.volume.maximum:
         discard_pending_restore("max_changed")
         return None
-    if pending["left_at"] != control.volume.level:
+    left_min = pending.get("left_min", pending["left_at"])
+    if not left_min <= control.volume.level <= pending["left_at"]:
         discard_pending_restore("manual_volume")
         return None
     return "restored" if await restore_atv_volume(control, pending) else "restore_pending"

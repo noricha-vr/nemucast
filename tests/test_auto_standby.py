@@ -2115,6 +2115,12 @@ def test_cleanup_still_preserves_restore_when_off_restore_disabled(
     [
         ("level", True),
         ("left_at", -1),
+        ("left_min", True),
+        ("left_min", None),
+        ("left_min", 9.0),
+        ("left_min", -1),
+        ("left_min", 11),
+        ("left_min", 31),
         ("max", 0),
         ("created_at", float("nan")),
         ("created_at", float("inf")),
@@ -2130,3 +2136,130 @@ def test_invalid_pending_never_restores(atv_rig: Mock, field: str, value: Any) -
     data[field] = value
     auto.AUTO_PENDING_RESTORE_FILE.write_text(json.dumps(data))
     assert auto.load_pending_restore("Dell") is None
+
+
+@pytest.mark.parametrize("resume_level", [12, 13])
+@pytest.mark.parametrize("cleanup", [False, True])
+def test_first_lowering_failed_readback_then_off_preserves_restore(
+    atv_rig: Mock, cleanup: bool, resume_level: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """初回の下降だけ反映された後に消灯しても、元音量を保留して次の点灯で戻す。"""
+    from nemucast import auto_standby as auto
+    from nemucast import tv_volume
+
+    original_factory = tv_volume.AndroidTVRemote.side_effect
+
+    def fail_readback(*args: Any) -> Mock:
+        if atv_rig.remotes:
+            atv_rig.connect_error = tv_volume.CannotConnect()
+        return original_factory(*args)
+
+    tv_volume.AndroidTVRemote.side_effect = fail_readback
+    atv_rig.tick()
+    state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+    assert atv_rig.level == 12
+    assert state["original_volume"] == 13
+    assert state["last_lowered_to"] is None
+    assert state["atv_lowering"] == {"from": 13, "to": 12}
+
+    tv_volume.AndroidTVRemote.side_effect = original_factory
+    atv_rig.connect_error = None
+    auto.read_power_state.return_value = False
+    atv_rig.events.clear()
+    atv_rig.tick(cleanup=cleanup)
+    pending = auto.load_pending_restore("Dell")
+    assert pending is not None
+    assert (pending["level"], pending["left_at"], pending["left_min"]) == (13, 13, 12)
+    assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["original_volume"] is None
+    assert not atv_rig.events  # 消灯中は読み取り・音量キーとも送らない。
+
+    auto.read_power_state.return_value = True
+    atv_rig.level = resume_level
+    with caplog.at_level(logging.INFO):
+        atv_rig.tick()
+    assert atv_rig.level == 13
+    assert auto.load_pending_restore("Dell") is None
+    assert "result=restored" in caplog.text
+    keys = [event[0] for event in atv_rig.events if event[0].startswith("VOLUME_")]
+    assert keys == ["VOLUME_UP"] * (13 - resume_level)
+    auto.power_off.assert_not_awaited()
+
+
+@pytest.mark.parametrize("level", [9, 10, 11, 12, 13])
+def test_pending_lowering_range_restores_only_inside_inclusive_bounds(
+    atv_rig: Mock, level: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    from nemucast import auto_standby as auto
+
+    pending_atv(level=15, left=12)
+    pending = auto.load_pending_restore("Dell")
+    pending["left_min"] = 10
+    auto.save_state(auto.AUTO_PENDING_RESTORE_FILE, pending, touch=False)
+    atv_rig.level = level
+    with caplog.at_level(logging.INFO):
+        atv_rig.tick()
+    assert auto.load_pending_restore("Dell") is None
+    if 10 <= level <= 12:
+        assert atv_rig.level == 15
+        assert "result=restored" in caplog.text
+        assert not [e for e in atv_rig.events if e[0] == "VOLUME_DOWN"]
+    else:
+        assert "reason=manual_volume" in caplog.text
+        assert not [e for e in atv_rig.events if e[0] == "VOLUME_UP"]
+        assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["original_volume"] == level
+    auto.power_off.assert_not_awaited()
+
+
+@pytest.mark.parametrize("last", [None, 12])
+def test_defer_unconfirmed_lowering_uses_range_even_without_last(
+    atv_rig: Mock, last: int | None
+) -> None:
+    from nemucast import auto_standby as auto
+
+    state = auto.fresh_state("Dell")
+    state.update(
+        volume_source="atv",
+        volume_max=30,
+        original_volume=13,
+        last_lowered_to=last,
+        atv_lowering={"from": 12, "to": 9},
+    )
+    auto.defer_atv_restore("Dell", state, cleanup=True)
+    pending = auto.load_pending_restore("Dell")
+    assert pending is not None
+    assert (pending["level"], pending["left_at"], pending["left_min"]) == (13, 12, 9)
+    assert not atv_rig.events
+
+
+@pytest.mark.parametrize("level,left,left_min", [(13, 13, 12), (13, 13, 13), (12, 13, 10)])
+def test_pending_range_validation_allows_only_meaningful_restore(
+    atv_rig: Mock, level: int, left: int, left_min: int
+) -> None:
+    from nemucast import auto_standby as auto
+
+    pending_atv(level=level, left=left)
+    pending = json.loads(auto.AUTO_PENDING_RESTORE_FILE.read_text())
+    pending["left_min"] = left_min
+    auto.save_state(auto.AUTO_PENDING_RESTORE_FILE, pending, touch=False)
+    assert (auto.load_pending_restore("Dell") is not None) == (level == left and left_min < left)
+
+
+@pytest.mark.parametrize("power_lost", [False, True])
+def test_pending_range_restore_failure_updates_only_trusted_progress(
+    atv_rig: Mock, power_lost: bool
+) -> None:
+    import asyncio
+
+    from nemucast import auto_standby as auto
+    from nemucast.tv_volume import AtvVolume, TvVolumeError, TvVolumePowerError
+
+    pending_atv(level=15, left=12)
+    pending = auto.load_pending_restore("Dell")
+    pending["left_min"] = 10
+    auto.save_state(auto.AUTO_PENDING_RESTORE_FILE, pending, touch=False)
+    error = TvVolumePowerError("off") if power_lost else TvVolumeError("readback failed")
+    control = Mock(volume=AtvVolume(11, 30), move_to=AsyncMock(side_effect=error))
+    assert not asyncio.run(auto.restore_atv_volume(control, pending))
+    saved = auto.load_pending_restore("Dell")
+    assert (saved["left_min"], saved["left_at"]) == ((10, 12) if power_lost else (11, 11))
+    assert saved["level"] == 15
