@@ -217,3 +217,83 @@ def test_read_power_state_logs_raw_snapshot(
     ]
     remote.disconnect.assert_called_once_with()
     remote.send_key_command.assert_not_called()
+
+
+def test_off_observed_then_on_again_never_resends(monkeypatch, caplog) -> None:
+    """OFF を観測した後の True は人の操作として扱い、トグルを再送しない。"""
+    remote, readback = Mock(is_on=True), Mock(is_on=True)
+    reader = AsyncMock(side_effect=[(remote, True), (readback, True)])
+    monkeypatch.setattr(tv_power, "_read_is_on", reader)
+    monkeypatch.setattr(tv_power, "_wait_off", AsyncMock(return_value=True))
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(power_off("h")) == "turned_on_again"
+    remote.send_key_command.assert_called_once_with(tv_power.TV_POWER_KEY)
+    readback.send_key_command.assert_not_called()
+    assert reader.await_count == 2
+    assert "sent_off=True is_on=True" in caplog.text
+    remote.disconnect.assert_called_once()
+    readback.disconnect.assert_called_once()
+
+
+@pytest.mark.parametrize("off_observed", [True, False])
+def test_readback_failure_preserves_off_observation(monkeypatch, off_observed: bool) -> None:
+    """読み戻し失敗時も OFF 観測の有無を呼び出し側で区別できる。"""
+    remote = Mock(is_on=True)
+    failure = TvPowerError("readback lost")
+    reader = AsyncMock(side_effect=[(remote, True), failure])
+    monkeypatch.setattr(tv_power, "_read_is_on", reader)
+    monkeypatch.setattr(tv_power, "_wait_off", AsyncMock(return_value=off_observed))
+    with pytest.raises(TvPowerError) as caught:
+        asyncio.run(power_off("h"))
+    if off_observed:
+        assert getattr(caught.value, "off_observed", False) is True
+        assert caught.value.__cause__ is failure
+    else:
+        assert caught.value is failure
+    assert reader.await_count == 2
+    remote.send_key_command.assert_called_once()
+    remote.disconnect.assert_called_once()
+
+
+def test_no_off_observed_retries_only_after_extra_read(monkeypatch, caplog) -> None:
+    first, check, retry, final = [Mock(is_on=value) for value in (True, True, True, False)]
+    reader = AsyncMock(side_effect=[(first, True), (check, True), (retry, True), (final, False)])
+    monkeypatch.setattr(tv_power, "_read_is_on", reader)
+    monkeypatch.setattr(tv_power, "_wait_off", AsyncMock(side_effect=[False, True]))
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(power_off("h")) == "turned_off"
+    first.send_key_command.assert_called_once()
+    check.send_key_command.assert_not_called()
+    retry.send_key_command.assert_called_once()
+    final.send_key_command.assert_not_called()
+    assert reader.await_count == 4
+    assert "sent_off=False is_on=True" in caplog.text
+    assert "POWER 再送前の追加読み戻し: attempt=2 is_on=True" in caplog.text
+    assert "sent_off=True is_on=False" in caplog.text
+    for remote in (first, check, retry, final):
+        remote.disconnect.assert_called_once()
+
+
+@pytest.mark.parametrize("extra_state", [False, None])
+def test_retry_extra_read_never_toggles_off_or_unknown(monkeypatch, extra_state) -> None:
+    first, check, retry = [Mock(is_on=value) for value in (True, True, extra_state)]
+    monkeypatch.setattr(
+        tv_power,
+        "_read_is_on",
+        AsyncMock(
+            side_effect=[
+                (first, True),
+                (check, True),
+                (retry, extra_state),
+            ]
+        ),
+    )
+    monkeypatch.setattr(tv_power, "_wait_off", AsyncMock(return_value=False))
+    if extra_state is False:
+        assert asyncio.run(power_off("h")) == "turned_off"
+    else:
+        with pytest.raises(TvPowerError):
+            asyncio.run(power_off("h"))
+    first.send_key_command.assert_called_once()
+    check.send_key_command.assert_not_called()
+    retry.send_key_command.assert_not_called()

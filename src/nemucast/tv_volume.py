@@ -17,6 +17,10 @@ class TvVolumeError(TvPowerError):
     """音量の取得・送信・読み戻しを確認できなかった。"""
 
 
+class TvVolumePowerError(TvVolumeError):
+    """点灯を確認できず、音量の読み値も復元の進捗も信用できない。"""
+
+
 ATV_MIN_LEVEL = 1
 ATV_RESTORE_TOLERANCE = 1
 
@@ -57,7 +61,7 @@ class AtvVolumeControl:
             self.remote = None
 
     async def read(self) -> AtvVolume:
-        """MAC を照合して新規接続し、音量の push を有限時間待つ。"""
+        """MAC と点灯を確認し、新規接続の音量の push を有限時間待つ。"""
         self.disconnect()
         try:
             if not self.expected_mac or await read_mac(self.host) != self.expected_mac.lower():
@@ -67,6 +71,8 @@ class AtvVolumeControl:
             await asyncio.wait_for(self.remote.async_connect(), CONNECT_TIMEOUT_SEC)
             deadline = asyncio.get_running_loop().time() + AUTO_ATV_VOLUME_WAIT_SEC
             while True:
+                if self.remote.is_on is not True:
+                    raise TvVolumePowerError("消灯中または電源不明のため ATV 音量を採用しません")
                 volume = AtvVolume.parse(self.remote.volume_info)
                 if volume is not None:
                     self.volume = volume
@@ -77,6 +83,9 @@ class AtvVolumeControl:
         except (CannotConnect, ConnectionClosed, InvalidAuth, TimeoutError, OSError) as exc:
             self.disconnect()
             raise TvVolumeError(f"ATV 音量に接続できません: {exc!r}") from exc
+        except TvVolumeError:
+            self.disconnect()
+            raise
         except TvPowerError as exc:
             self.disconnect()
             raise TvVolumeError(str(exc)) from exc
@@ -85,6 +94,8 @@ class AtvVolumeControl:
         """送信バッファを破棄しないよう push を待ってから読み戻しへ進む。"""
         if self.remote is None:
             raise TvVolumeError("ATV 音量の接続がありません")
+        if self.remote.is_on is not True:
+            raise TvVolumePowerError("消灯中または電源不明のため ATV 音量キーを送りません")
         updated = asyncio.Event()
 
         def on_volume(_info: Any) -> None:

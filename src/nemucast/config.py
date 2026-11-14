@@ -41,6 +41,9 @@ AUTO_ATV_VOLUME_WAIT_SEC = float(os.getenv("AUTO_ATV_VOLUME_WAIT_SEC", "5"))
 AUTO_VOLUME_ALERT_FILE = Path(
     os.getenv("AUTO_VOLUME_ALERT_FILE", f"{LOG_DIR}/auto_volume_alert_state.json")
 )
+AUTO_PENDING_RESTORE_FILE = Path(
+    os.getenv("AUTO_PENDING_RESTORE_FILE", f"{LOG_DIR}/auto_pending_restore.json")
+)
 
 # Chromecast を quit_app した後、standby 完了を待つ秒数
 STANDBY_WAIT_SEC = int(os.getenv("STANDBY_WAIT_SEC", "2"))

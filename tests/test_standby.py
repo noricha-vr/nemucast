@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nemucast import standby
-from nemucast.tv_power import TvPowerError
+from nemucast.tv_power import PowerOffUnconfirmedError, TvPowerError
 
 
 def _fake_discovery(host: str | None) -> tuple[object, MagicMock]:
@@ -68,9 +68,12 @@ class TestMain:
         assert exc.value.code == 1
         assert "Missing" in alert.call_args.args[0]
 
-    def test_power_off_failure_exits_nonzero_and_alerts(self) -> None:
+    @pytest.mark.parametrize(
+        "error", [TvPowerError("切れない"), PowerOffUnconfirmedError("不明", off_observed=True)]
+    )
+    def test_power_off_failure_exits_nonzero_and_alerts(self, error: TvPowerError) -> None:
         async def boom(host: str, expected_mac: str | None = None) -> str:
-            raise TvPowerError("切れない")
+            raise error
 
         with (
             patch.object(standby, "resolve_host", return_value="10.0.0.5"),
@@ -124,3 +127,23 @@ def test_default_target_stays_chromecast_name(
     monkeypatch.setattr(config, "AUTO_TARGET_NAME", values["AUTO_TARGET_NAME"])
     module = runpy.run_path(standby.__file__)
     assert module["parse_args"]([]).name == "リビングルーム"
+
+
+def test_turned_on_again_finishes_without_notification(monkeypatch, caplog) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    from nemucast import standby
+
+    monkeypatch.setattr(standby, "setup_logging", Mock())
+    monkeypatch.setattr(standby, "resolve_host", Mock(return_value="h"))
+    monkeypatch.setattr(standby, "load_identity", Mock(return_value="aa:bb"))
+    monkeypatch.setattr(standby, "power_off", AsyncMock(return_value="turned_on_again"))
+    notify = Mock()
+    monkeypatch.setattr(standby, "send_discovery_alert", notify)
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        standby.main([])
+    assert "点け直されたため再送しません" in caplog.text
+    notify.assert_not_called()
+    standby.power_off.assert_awaited_once()

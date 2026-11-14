@@ -32,6 +32,7 @@ from nemucast.config import (
     AUTO_NIGHT_START,
     AUTO_NOT_FOUND_ALERT_AFTER_TICKS,
     AUTO_NOT_FOUND_ALERT_FILE,
+    AUTO_PENDING_RESTORE_FILE,
     AUTO_POWER_OFF_ALERT_FILE,
     AUTO_RESTORE_TOLERANCE,
     AUTO_RESTORE_VOLUME,
@@ -48,7 +49,13 @@ from nemucast.config import (
     MANUAL_RISE_THRESHOLD,
     STEP,
 )
-from nemucast.tv_power import TvPowerError, load_identity, power_off, read_power_state
+from nemucast.tv_power import (
+    PowerOffUnconfirmedError,
+    TvPowerError,
+    load_identity,
+    power_off,
+    read_power_state,
+)
 from nemucast.tv_volume import (
     ATV_MIN_LEVEL,
     ATV_RESTORE_TOLERANCE,
@@ -84,6 +91,7 @@ def fresh_state(device_name: str) -> dict[str, Any]:
         "original_volume": None,
         "volume_source": "cast",
         "volume_max": None,
+        "atv_lowering": None,
         "updated_at": time.time(),
     }
 
@@ -115,6 +123,15 @@ def valid_session_state(data: dict[str, Any]) -> bool:
             if type(value) is not int or not 0 <= value <= maximum:
                 return False
         elif type(value) not in (int, float) or not 0 <= value <= 1:
+            return False
+    lowering = data.get("atv_lowering")
+    if lowering is not None:
+        if source != "atv" or not isinstance(lowering, dict):
+            return False
+        start, target = lowering.get("from"), lowering.get("to")
+        if type(start) is not int or type(target) is not int:
+            return False
+        if not 0 <= target < start <= maximum:
             return False
     return True
 
@@ -161,6 +178,90 @@ def save_state(state_file: Path, state: dict[str, Any], *, touch: bool = True) -
         encoding="utf-8",
     )
     os.replace(tmp_file, state_file)
+
+
+def load_pending_restore(name: str) -> dict[str, Any] | None:
+    """保留音量を読む。破損・別機器・不正な整数段は操作に使わない。"""
+    try:
+        data = json.loads(AUTO_PENDING_RESTORE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("device_name") != name:
+        return None
+    volume = AtvVolume.parse({"level": data.get("level"), "max": data.get("max")})
+    left = AtvVolume.parse({"level": data.get("left_at"), "max": data.get("max")})
+    left_min = AtvVolume.parse(
+        {"level": data.get("left_min", data.get("left_at")), "max": data.get("max")}
+    )
+    created = data.get("created_at")
+    if volume is None or left is None or left_min is None:
+        return None
+    if not left_min.level <= left.level <= volume.level or volume.level <= left_min.level:
+        return None
+    try:
+        valid_created = type(created) in (int, float) and math.isfinite(created)
+    except OverflowError:
+        valid_created = False
+    if not valid_created:
+        return None
+    return data
+
+
+def defer_atv_restore(name: str, state: dict[str, Any], *, cleanup: bool = False) -> None:
+    """キーを送らず復元責任をアトミックに保存する。保存失敗時は OFF に進まない。"""
+    original, last = state.get("original_volume"), state.get("last_lowered_to")
+    if (not AUTO_RESTORE_VOLUME and not cleanup) or state.get("volume_source") != "atv":
+        return
+    lowering = state.get("atv_lowering")
+    if lowering is not None:
+        last, left_min = lowering["from"], lowering["to"]
+    else:
+        left_min = last
+    if original is None or last is None or original < last or original <= left_min:
+        return
+    pending = {
+        "device_name": name,
+        "level": original,
+        "left_at": last,
+        "max": state["volume_max"],
+        "created_at": time.time(),
+    }
+    if lowering is not None:
+        pending["left_min"] = left_min
+    save_state(
+        AUTO_PENDING_RESTORE_FILE,
+        pending,
+        touch=False,
+    )
+    logging.info(
+        "音量復元を保留: device=%s level=%s left_at=%s left_min=%s", name, original, last, left_min
+    )
+
+
+def discard_pending_restore(reason: str) -> None:
+    """復元済みまたは人の操作により不要になった保留を消す。"""
+    AUTO_PENDING_RESTORE_FILE.unlink(missing_ok=True)
+    logging.info("保留復元を破棄: reason=%s", reason)
+
+
+def log_atv_decision(
+    branch: str, is_on: bool | None, level: int | None, state: dict[str, Any]
+) -> None:
+    """キー送信前の判断材料を毎 tick 一行に残す。"""
+    updated = state.get("updated_at")
+    elapsed = time.time() - updated if type(updated) in (int, float) else None
+    logging.info(
+        "判断: branch=%s is_on=%s level=%s last_lowered_to=%s original=%s "
+        "count=%s pending=%s since_last_update=%s",
+        branch,
+        is_on,
+        level,
+        state.get("last_lowered_to"),
+        state.get("original_volume"),
+        state["consecutive_lowered"],
+        "あり" if load_pending_restore(state["device_name"]) else "なし",
+        elapsed,
+    )
 
 
 def in_night_window(now: datetime, start: str, end: str) -> bool:
@@ -350,21 +451,50 @@ def prepare_volume_state(state: dict[str, Any], source: str, maximum: int | None
     if state.get("volume_source", "cast") != source or (
         source == "atv" and state.get("volume_max") != maximum
     ):
-        logging.warning("音量源または max の変更によりセッションを初期化: source=%s", source)
+        log = (
+            logging.warning
+            if (state.get("original_volume") is not None or state.get("consecutive_lowered", 0) > 0)
+            else logging.info
+        )
+        log("音量源または max の変更によりセッションを初期化: source=%s", source)
         state.update(fresh_state(state["device_name"]))
     state.update(volume_source=source, volume_max=maximum)
+
+
+def reconcile_atv_lowering(state: dict[str, Any], current: int) -> bool:
+    """読み戻せなかった自分の下降範囲なら、復元先と count を保って実値を採用する。"""
+    lowering = state.get("atv_lowering")
+    if lowering is None:
+        return False
+    state["atv_lowering"] = None
+    if not lowering["to"] <= current <= lowering["from"]:
+        return False
+    state["last_lowered_to"] = current
+    logging.info(
+        "ATV 下降途中の読み戻しを回復: from=%d to=%d current=%d count=%d",
+        lowering["from"],
+        lowering["to"],
+        current,
+        state["consecutive_lowered"],
+    )
+    return True
 
 
 async def run_atv_tick(control: AtvVolumeControl, state: dict[str, Any]) -> TickResult:
     """整数段で下げ、実際に下がった tick または確認済みの下限だけを数える。"""
     current = control.volume.level
     maximum = control.volume.maximum
+    lowering = state.get("atv_lowering")
+    if reconcile_atv_lowering(state, current):
+        # 復旧 tick は実値の確定だけを行い、二重に下降・カウントしない。
+        return TickResult.VOLUME_UNCHANGED
+    last = state.get("last_lowered_to")
+    if lowering is not None or (last is not None and current != last):
+        logging.info("手動音量変更: previous=%s current=%d volume_source=atv", last, current)
+        discard_pending_restore("manual_volume")
+        state.update(consecutive_lowered=0, original_volume=current)
     if state["consecutive_lowered"] >= AUTO_LOWERED_THRESHOLD:
         return TickResult.STANDBY
-    last = state.get("last_lowered_to")
-    if last is not None and current > last + MANUAL_RISE_THRESHOLD * maximum:
-        logging.info("手動音量上昇: previous=%d current=%d volume_source=atv", last, current)
-        state.update(consecutive_lowered=0, original_volume=current)
     if state.get("original_volume") is None:
         state["original_volume"] = current
     # 送信途中で失敗しても復元先を失わない。
@@ -373,7 +503,10 @@ async def run_atv_tick(control: AtvVolumeControl, state: dict[str, Any]) -> Tick
     steps = max(ATV_MIN_LEVEL, round(-STEP * maximum))
     target = min(current, max(minimum, current - steps))
     if target < current:
+        state["atv_lowering"] = {"from": current, "to": target}
+        save_state(AUTO_STATE_FILE, state)
         after = await control.move_to(target)
+        state["atv_lowering"] = None
         if after.level >= current:
             logging.warning("ATV 音量低下を確認できないためカウントを進めません")
             return TickResult.VOLUME_UNCHANGED
@@ -389,36 +522,36 @@ async def run_atv_tick(control: AtvVolumeControl, state: dict[str, Any]) -> Tick
     )
 
 
-async def restore_atv_volume(
-    control: AtvVolumeControl, state: dict[str, Any], *, cleanup: bool = False
-) -> int:
-    """手動上昇を尊重し、元音量へ UP して読み戻す。OFF 前の失敗は警告で続行する。"""
-    current = control.volume.level
-    original, last = state.get("original_volume"), state.get("last_lowered_to")
-    if original is None:
-        return current
-    if (
-        cleanup
-        and last is not None
-        and current > last + MANUAL_RISE_THRESHOLD * control.volume.maximum
-    ):
-        logging.info("手動で音量が上げられているため復元しません: current=%d", current)
-        return current
+async def restore_atv_volume(control: AtvVolumeControl, pending: dict[str, Any]) -> bool:
+    """送信前に復元範囲を保存し、読み戻せなくても自分の上昇を保留に含める。"""
+    if control.volume.level < pending["level"]:
+        pending.update(left_min=control.volume.level, left_at=pending["level"])
+        save_state(AUTO_PENDING_RESTORE_FILE, pending, touch=False)
     try:
-        after = await control.move_to(original) if current < original else control.volume
-        if abs(after.level - original) <= ATV_RESTORE_TOLERANCE:
-            logging.info("音量復元を読み戻しで確認: original_volume=%d volume_source=atv", original)
-        else:
+        after = await control.move_to(pending["level"])
+        if abs(after.level - pending["level"]) > ATV_RESTORE_TOLERANCE:
             raise TvVolumeError("ATV 音量の復元先との差が 1 段を超えています")
     except TvPowerError as exc:
         logging.warning("音量復元を読み戻しで確認できませんでした: %s", exc)
-        if cleanup:
-            # 復元の途中経過を残す。残さないと次 tick で自分の UP を手動上昇と誤認して打ち切る
-            state["last_lowered_to"] = control.volume.level
-            # updated_at は更新しない（stale な窓外セッションを新鮮と誤認して通常制御しない）
-            save_state(AUTO_STATE_FILE, state, touch=False)
-            raise
-    return original
+        return False
+    logging.info("音量復元を読み戻しで確認: original_volume=%d volume_source=atv", pending["level"])
+    discard_pending_restore("restored")
+    return True
+
+
+async def handle_pending_restore(name: str, control: AtvVolumeControl) -> str | None:
+    """保留が現在の機器・音量に一致する時だけ復元し、その tick を終える。"""
+    pending = load_pending_restore(name)
+    if pending is None:
+        return None
+    if pending["max"] != control.volume.maximum:
+        discard_pending_restore("max_changed")
+        return None
+    left_min = pending.get("left_min", pending["left_at"])
+    if not left_min <= control.volume.level <= pending["left_at"]:
+        discard_pending_restore("manual_volume")
+        return None
+    return "restored" if await restore_atv_volume(control, pending) else "restore_pending"
 
 
 def volume_unavailable(cast: Any, name: str, state: dict[str, Any], is_on: bool | None) -> None:
@@ -459,9 +592,36 @@ async def process_atv_device(
     expected_mac: str | None,
     *,
     cleanup: bool,
+    pending_only: bool = False,
 ) -> None:
-    """Cast 音量を信用できない時だけ ATV を使い、取得不能なら安全に保留する。"""
+    """ATV の保留があるか Cast 音量を信用できない時に使い、取得不能なら保留する。"""
+    # 消灯中の volume_info は 0/1 になり得る。読まず、保存済みの段だけを引き継ぐ。
+    if is_on is False and expected_mac is not None:
+        if state.get("volume_source", "cast") != "atv" and state.get("original_volume") is not None:
+            log_atv_decision("volume_unavailable", is_on, None, state)
+            volume_unavailable(cast, name, state, is_on)
+            return
+        log_atv_decision("cleanup" if cleanup else "not_watching", is_on, None, state)
+        if not pending_only:
+            defer_atv_restore(name, state, cleanup=True)
+            save_state(AUTO_STATE_FILE, fresh_state(name))
+        log_device_status(cast, name, is_on, volume_source="none")
+        logging.info(
+            "tick 結果: %s device=%s", "outside_window" if pending_only else "not_watching", name
+        )
+        log_tick_summary(
+            name,
+            is_on,
+            getattr(cast.status, "app_id", None),
+            None,
+            None,
+            0,
+            "outside_window" if pending_only else "not_watching",
+            volume_source="none",
+        )
+        return
     if not is_watching(cast, is_on) and state.get("original_volume") is None:
+        log_atv_decision("not_watching", is_on, None, state)
         log_device_status(cast, name, is_on, volume_source="none")
         save_state(AUTO_STATE_FILE, fresh_state(name))
         logging.info("tick 結果: not_watching device=%s", name)
@@ -482,13 +642,17 @@ async def process_atv_device(
         volume = await control.read() if control is not None else None
         log_device_status(cast, name, is_on, volume_source="atv" if volume else "none", atv=volume)
         if volume is None:
+            log_atv_decision("volume_unavailable", is_on, None, state)
             volume_unavailable(cast, name, state, is_on)
             return
         prepare_volume_state(state, "atv", volume.maximum)
-        await complete_atv_tick(cast, name, state, is_on, control, cleanup=cleanup)
+        await complete_atv_tick(
+            cast, name, state, is_on, control, cleanup=cleanup, pending_only=pending_only
+        )
     except TvVolumeError as exc:
         logging.warning("ATV 音量制御を保留: %s", exc)
         if volume is None:
+            log_atv_decision("volume_unavailable", is_on, None, state)
             log_device_status(cast, name, is_on, volume_source="none")
         volume_unavailable(cast, name, state, is_on)
     finally:
@@ -504,37 +668,93 @@ async def complete_atv_tick(
     control: AtvVolumeControl,
     *,
     cleanup: bool,
+    pending_only: bool = False,
 ) -> None:
-    """ATV の通常 tick・後始末・復元後の OFF を行い、結果を 1 行にまとめる。"""
+    """ATV の判断と終了時の実値を一行ずつ記録する。"""
     before = control.volume.level
-    watching = is_watching(cast, is_on)
-    if cleanup or not watching:
-        after = await restore_atv_volume(control, state, cleanup=True)
-        save_state(AUTO_STATE_FILE, fresh_state(name))
-        outcome, count = ("cleanup" if watching else "not_watching"), 0
-    else:
-        result = await run_atv_tick(control, state)
-        save_state(AUTO_STATE_FILE, state)
-        after, count, outcome = control.volume.level, state["consecutive_lowered"], result.value
-        if result is TickResult.STANDBY:
-            if AUTO_RESTORE_VOLUME:
-                after = await restore_atv_volume(control, state)
-            control.disconnect()
-            # power_off の失敗は音量取得失敗に化けさせず、従来同様に再試行待ちにする。
-            outcome = await power_off(cast.cast_info.host, control.expected_mac)
-            save_state(AUTO_STATE_FILE, fresh_state(name))
+    branch = atv_branch(state, is_on, before, cleanup=cleanup)
+    log_atv_decision(branch, is_on, before, state)
+    outcome, count = await execute_atv_tick(
+        cast, name, state, is_on, control, cleanup=cleanup, pending_only=pending_only
+    )
     logging.info("tick 結果: %s count=%d", outcome, count)
     log_tick_summary(
         name,
         is_on,
         getattr(cast.status, "app_id", None),
         before,
-        after,
+        control.volume.level,
         count,
         outcome,
         volume_source="atv",
         atv=control.volume,
     )
+
+
+def atv_branch(state: dict[str, Any], is_on: bool | None, level: int, *, cleanup: bool) -> str:
+    """通常処理・人の変更・OFF 再試行・保留復元を区別する。"""
+    if cleanup or is_on is not True:
+        return "cleanup" if cleanup else "not_watching"
+    lowering = state.get("atv_lowering")
+    if lowering is not None:
+        return "normal" if lowering["to"] <= level <= lowering["from"] else "restart_manual"
+    last = state.get("last_lowered_to")
+    if state["consecutive_lowered"] >= AUTO_LOWERED_THRESHOLD:
+        return "restart_manual" if last is not None and level != last else "pending_retry"
+    if load_pending_restore(state["device_name"]):
+        return "pending_restore"
+    return "restart_manual" if last is not None and level != last else "normal"
+
+
+async def execute_atv_tick(
+    cast: Any,
+    name: str,
+    state: dict[str, Any],
+    is_on: bool | None,
+    control: AtvVolumeControl,
+    *,
+    cleanup: bool,
+    pending_only: bool,
+) -> tuple[str, int]:
+    """点灯確認済みの通常 tick 以外では音量を下げず、OFF 前にも復元しない。"""
+    if cleanup or is_on is not True:
+        lowering = state.get("atv_lowering")
+        recovered = reconcile_atv_lowering(state, control.volume.level)
+        last = state.get("last_lowered_to")
+        manual = (lowering is not None and not recovered) or (
+            last is not None and control.volume.level != last
+        )
+        if is_on is True and manual:
+            discard_pending_restore("manual_volume")
+        else:
+            defer_atv_restore(name, state, cleanup=True)
+        save_state(AUTO_STATE_FILE, fresh_state(name))
+        return ("cleanup" if cleanup else "not_watching"), 0
+    # OFF 失敗後は復元より先に人の操作を判定し、同値ならキーなしで再試行する。
+    retry = state["consecutive_lowered"] >= AUTO_LOWERED_THRESHOLD
+    if not retry or pending_only:
+        restored = await handle_pending_restore(name, control)
+        if restored is not None:
+            save_state(AUTO_STATE_FILE, fresh_state(name))
+            return restored, 0
+    if pending_only:
+        return "outside_window", 0
+    result = await run_atv_tick(control, state)
+    save_state(AUTO_STATE_FILE, state)
+    count = state["consecutive_lowered"]
+    if result is not TickResult.STANDBY:
+        return result.value, count
+    defer_atv_restore(name, state)
+    control.disconnect()
+    try:
+        outcome = await power_off(cast.cast_info.host, control.expected_mac)
+    except PowerOffUnconfirmedError as exc:
+        if not exc.off_observed:
+            raise
+        logging.info("OFF 観測後の状態が不明のため、点け直しの可能性を優先して終了: %s", exc)
+        outcome = "turned_on_again"
+    save_state(AUTO_STATE_FILE, fresh_state(name))
+    return ("woken" if outcome == "turned_on_again" else outcome), count
 
 
 def process_device(cast: Any, name: str, state: dict[str, Any], *, cleanup: bool) -> None:
@@ -544,7 +764,8 @@ def process_device(cast: Any, name: str, state: dict[str, Any], *, cleanup: bool
     is_on = None
     if expected_mac is not None:
         is_on = asyncio.run(read_power_state(cast.cast_info.host, expected_mac))
-    if not usable_cast_volume(getattr(cast.status, "volume_level", None)):
+    pending_atv = expected_mac is not None and load_pending_restore(name) is not None
+    if pending_atv or not usable_cast_volume(getattr(cast.status, "volume_level", None)):
         asyncio.run(process_atv_device(cast, name, state, is_on, expected_mac, cleanup=cleanup))
         return
     prepare_volume_state(state, "cast")
@@ -595,6 +816,46 @@ def cleanup_session(name: str, state: dict[str, Any]) -> None:
         process_device(cast, name, state, cleanup=True)
     except (TvPowerError, PyChromecastError, OSError, RuntimeError) as exc:
         logging.warning("時間外の音量復元を保留: %s", exc)
+        log_error_summary(name, state)
+    finally:
+        stop_discovery(browser)
+
+
+def log_error_summary(name: str, state: dict[str, Any]) -> None:
+    """確定できない観測値を None として例外 tick も集計に残す。"""
+    log_tick_summary(
+        name,
+        None,
+        None,
+        None,
+        None,
+        state["consecutive_lowered"],
+        "error",
+        volume_source=state.get("volume_source", "none"),
+    )
+
+
+def restore_pending_outside_window(name: str, state: dict[str, Any]) -> None:
+    """窓外・進行中セッションなしなら、点灯した対象の保留復元だけ試す。"""
+    browser = None
+    try:
+        cast, browser = discover_chromecasts(name)
+        if cast is None:
+            logging.info("tick 結果: not_found device=%s", name)
+            return
+        cast.wait(timeout=CONNECT_TIMEOUT_SEC)
+        expected_mac = load_identity(name)
+        if expected_mac is None:
+            return
+        is_on = asyncio.run(read_power_state(cast.cast_info.host, expected_mac))
+        asyncio.run(
+            process_atv_device(
+                cast, name, state, is_on, expected_mac, cleanup=False, pending_only=True
+            )
+        )
+    except (TvPowerError, PyChromecastError, OSError, RuntimeError) as exc:
+        logging.warning("時間外の保留復元を保留: %s", exc)
+        log_error_summary(name, state)
     finally:
         stop_discovery(browser)
 
@@ -828,6 +1089,9 @@ def main(args: list[str] | None = None) -> None:
         sys.exit(1)
     if not night:
         if state.get("original_volume") is None:
+            if load_pending_restore(parsed.name):
+                restore_pending_outside_window(parsed.name, state)
+                return
             logging.info("tick 結果: outside_window")
             return
         if not is_session_continuable(state):
@@ -877,6 +1141,7 @@ def main(args: list[str] | None = None) -> None:
     except (TvPowerError, PyChromecastError) as exc:
         message = f"nemucast: テレビ '{parsed.name}' の夜間制御に失敗しました: {exc}"
         logging.error(message)
+        log_error_summary(parsed.name, state)
         # 一晩 15 分おきの通知で埋もれないよう、通知は進行中（音量を下げ始めた後）だけ
         if state.get("original_volume") is not None:
             send_discovery_alert(message)

@@ -32,6 +32,14 @@ class TvPowerError(Exception):
     """テレビの電源を切れなかった、または状態を確認できなかった。"""
 
 
+class PowerOffUnconfirmedError(TvPowerError):
+    """POWER 後の読み戻し失敗。送信接続での OFF 観測を保持する。"""
+
+    def __init__(self, message: str, *, off_observed: bool) -> None:
+        super().__init__(message)
+        self.off_observed = off_observed
+
+
 def cert_paths() -> tuple[Path, Path]:
     """クライアント証明書と秘密鍵のパスを返す。"""
     return TV_CERT_DIR / "tv_cert.pem", TV_CERT_DIR / "tv_key.pem"
@@ -160,13 +168,15 @@ async def power_off(host: str, expected_mac: str | None = None) -> str:
     """テレビの電源を切る。切れたことを新規接続で読み戻して確認する。
 
     Returns:
-        "already_off"（元から切れていた）または "turned_off"（切った）。
+        "already_off"（元から切れていた）、"turned_off"（切った）、
+        "turned_on_again"（OFF 観測後に点け直された。再送しない）。
 
     Args:
         host: テレビの IP。
         expected_mac: ペアリング時に記録した MAC。指定時は送信前に照合する。
 
     Raises:
+        PowerOffUnconfirmedError: OFF は観測したが、新規接続で状態を確認できない。
         TvPowerError: 接続できない・状態を読めない・リトライしても切れない。
     """
     if expected_mac is not None:
@@ -183,31 +193,57 @@ async def power_off(host: str, expected_mac: str | None = None) -> str:
         logging.info("テレビ %s は既に電源OFFです（is_on=False）。何も送りません。", host)
         return "already_off"
 
+    return await _power_off_attempts(host, remote)
+
+
+async def _send_power(remote: AndroidTVRemote) -> bool:
+    """POWER 後の OFF 通知を待ち、送信接続を必ず閉じる。"""
+    try:
+        remote.send_key_command(TV_POWER_KEY)
+        return await _wait_off(remote)
+    except ConnectionClosed as exc:
+        raise TvPowerError(f"キー送信中に切断されました: {exc!r}") from exc
+    finally:
+        remote.disconnect()
+
+
+async def _power_off_attempts(host: str, remote: AndroidTVRemote) -> str:
+    """OFF を一度も観測していない場合だけ、追加読み戻し後に再送する。"""
     for attempt in range(1, TV_POWER_MAX_ATTEMPTS + 1):
-        # POWER はトグル。読んでから送るまでに状態が変わっていたら（テレビ側の push は接続中に
-        # 随時届く）送らない。True と確認できている時だけ送る
+        if attempt > 1:
+            remote.disconnect()
+            remote, is_on = await _read_is_on(host)
+            logging.info("POWER 再送前の追加読み戻し: attempt=%d is_on=%s", attempt, is_on)
+            if is_on is not True:
+                remote.disconnect()
+                if is_on is False:
+                    return "turned_off"
+                raise TvPowerError("POWER 再送前の電源状態が不明です")
         if remote.is_on is not True:
             remote.disconnect()
             logging.info("テレビ %s は送信直前に電源OFFになっていました。何も送りません。", host)
             return "already_off"
         logging.info("テレビ %s に %s を送信します（%d 回目）", host, TV_POWER_KEY, attempt)
-        try:
-            remote.send_key_command(TV_POWER_KEY)
-        except ConnectionClosed as exc:
-            remote.disconnect()
-            raise TvPowerError(f"キー送信中に切断されました: {exc!r}") from exc
-        sent_off = await _wait_off(remote)
-        remote.disconnect()
+        sent_off = await _send_power(remote)
+        logging.info("POWER 送信後: attempt=%d sent_off=%s", attempt, sent_off)
         await asyncio.sleep(RECHECK_DELAY_SEC)
-        remote, is_on = await _read_is_on(host)  # 読み戻し（新規接続）
-        if not is_on:
+        try:
+            remote, is_on = await _read_is_on(host)
+        except TvPowerError as exc:
+            if sent_off:
+                raise PowerOffUnconfirmedError(str(exc), off_observed=True) from exc
+            raise
+        logging.info("POWER 読み戻し: attempt=%d sent_off=%s is_on=%s", attempt, sent_off, is_on)
+        if is_on is False:
             remote.disconnect()
-            logging.info(
-                "テレビ %s の電源OFFを読み戻しで確認しました（送信後通知=%s, 再接続 is_on=False）",
-                host,
-                sent_off,
-            )
+            logging.info("テレビ %s の電源OFFを読み戻しで確認しました", host)
             return "turned_off"
-        logging.warning("送信後も is_on=True のままです（%d 回目）", attempt)
+        if sent_off:
+            remote.disconnect()
+            logging.info("テレビ %s は点け直されました。POWER を再送しません。", host)
+            return "turned_on_again"
+        logging.warning(
+            "送信後も is_on=%s のままです（%d 回目 sent_off=%s）", is_on, attempt, sent_off
+        )
     remote.disconnect()
     raise TvPowerError(f"{TV_POWER_MAX_ATTEMPTS} 回送っても電源が切れませんでした")
