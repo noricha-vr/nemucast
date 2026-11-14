@@ -85,6 +85,8 @@ class AtvVolumeControl:
         """送信バッファを破棄しないよう push を待ってから読み戻しへ進む。"""
         if self.remote is None:
             raise TvVolumeError("ATV 音量の接続がありません")
+        if self.remote.is_on is not True:
+            raise TvVolumeError("消灯中または電源不明のため ATV 音量キーを送りません")
         updated = asyncio.Event()
 
         def on_volume(_info: Any) -> None:

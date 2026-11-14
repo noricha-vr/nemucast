@@ -19,6 +19,7 @@
 - 依存に `androidtvremote2==0.3.2` を追加
 
 ### Fixed
+- `nemucast-auto`: ATV の OFF 直前・後始末の音量キーをやめ、POWER 前に `AUTO_PENDING_RESTORE_FILE` へ復元情報を保存する。次の点灯中に音量未操作なら復元だけ行い、窓外でも保留復元だけは処理する。消灯中のキーによる点灯と OFF 前の急な音量上昇を防ぐ。手動の下降も数え直し、OFF 失敗後も先に人の操作を確認する。`power_off` は OFF 観測後の点け直しを `turned_on_again` とし再送しない（auto ATV は `woken`、standby はログを出して exit 0）。判断・例外 tick 要約・POWER の sent_off ログを追加し、初期 state の音量源変更で誤警告しない (#48)
 - `nemucast-auto`: Dell で Cast の音量の読みが 0.0 固定になったため、音量が下がらないまま 3 tick で電源が切れていた（#47）。Cast 音量が 0 以下・未受信でペアリング済みの時は、MAC 照合済みの Android TV Remote の `volume_info`（level/max）とキー `VOLUME_DOWN` / `VOLUME_UP` で整数段ごとに下げ、毎段新規接続で読み戻して確認する。元音量・手動上昇の判定・復元の読み戻しも同じ音量源で行う。音量が取れない時は電源を切らず、WARNING と日次通知（`AUTO_VOLUME_ALERT_FILE`）で `volume_unavailable` にする。`対象機器の生値` と `tick 要約` に `volume_source=cast|atv|none`（atv は `atv_level=n/max`）を追記。Cast 音量が使える機器は従来どおり
 - `nemucast-auto`: ペアリング済みで `is_on=True` なら `app_id=None` でも視聴中として扱い、アプリ情報欠落による制御の取りこぼしを防ぐ。MAC 照合時の値を再利用し、接続は増やさない
 - `nemucast-auto`: 視聴終了時も元音量へ復元してから state を初期化し、手動で上げた音量は維持する

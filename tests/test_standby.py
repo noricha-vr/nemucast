@@ -124,3 +124,23 @@ def test_default_target_stays_chromecast_name(
     monkeypatch.setattr(config, "AUTO_TARGET_NAME", values["AUTO_TARGET_NAME"])
     module = runpy.run_path(standby.__file__)
     assert module["parse_args"]([]).name == "リビングルーム"
+
+
+def test_turned_on_again_finishes_without_notification(monkeypatch, caplog) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    from nemucast import standby
+
+    monkeypatch.setattr(standby, "setup_logging", Mock())
+    monkeypatch.setattr(standby, "resolve_host", Mock(return_value="h"))
+    monkeypatch.setattr(standby, "load_identity", Mock(return_value="aa:bb"))
+    monkeypatch.setattr(standby, "power_off", AsyncMock(return_value="turned_on_again"))
+    notify = Mock()
+    monkeypatch.setattr(standby, "send_discovery_alert", notify)
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        standby.main([])
+    assert "点け直されたため再送しません" in caplog.text
+    notify.assert_not_called()
+    standby.power_off.assert_awaited_once()

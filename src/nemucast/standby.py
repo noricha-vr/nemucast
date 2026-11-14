@@ -93,6 +93,8 @@ def main(args: list[str] | None = None) -> None:
         logging.error(message)
         send_discovery_alert(message)
         sys.exit(1)
+    if result == "turned_on_again":
+        logging.info("テレビが点け直されたため再送しません（device=%s）", parsed.name)
     logging.info("完了: %s（device=%s）", result, parsed.name)
 
 
