@@ -1956,6 +1956,176 @@ def test_manual_volume_in_both_directions_restarts_even_after_failed_off(
     auto.power_off.assert_not_awaited()
 
 
+def test_manual_volume_unchanged_tick_updates_last_before_next_tick(
+    atv_rig: Mock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """手動変更直後に DOWN が効かなくても、次 tick で同じ実値を手動扱いしない。"""
+    from nemucast import auto_standby as auto
+    from tests.test_atv_volume import seed_atv
+
+    seed_atv(count=2, original=13, last=11)
+    atv_rig.level, atv_rig.stuck = 12, True
+    with caplog.at_level(logging.INFO):
+        atv_rig.tick()
+    state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+    assert state["last_lowered_to"] == 12
+    assert state["original_volume"] == 12
+    assert state["consecutive_lowered"] == 0
+    assert state["atv_lowering"] is None
+    assert "手動音量変更: previous=11 current=12" in caplog.text
+    assert "result=volume_unchanged" in caplog.text
+
+    caplog.clear()
+    atv_rig.stuck = False
+    with caplog.at_level(logging.INFO):
+        atv_rig.tick()
+    state = auto.load_state(auto.AUTO_STATE_FILE, "Dell")
+    assert state["last_lowered_to"] == atv_rig.level == 11
+    assert state["original_volume"] == 12
+    assert state["consecutive_lowered"] == 1
+    assert "手動音量変更" not in caplog.text
+    assert "判断: branch=normal" in caplog.text
+    assert "count=1 result=lowered" in caplog.text
+    assert [e[0] for e in atv_rig.events if e[0].startswith("VOLUME_")] == [
+        "VOLUME_DOWN",
+        "VOLUME_DOWN",
+    ]
+    auto.power_off.assert_not_awaited()
+
+
+def test_missing_target_in_window_has_one_idle_summary_and_decision(
+    fake_network: Callable[[list[str]], Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """対象不在でも観測不能値と保持中のカウントを一行で記録する。"""
+    from nemucast import auto_standby as auto
+    from tests.test_atv_volume import seed_atv
+
+    seed_atv(count=2, last=11)
+    with fake_network(["OtherDevice"]) as net, caplog.at_level(logging.INFO):
+        auto.main(["--name", "Dell"])
+    summaries = [m for m in caplog.messages if m.startswith("tick 要約:")]
+    assert summaries == [
+        "tick 要約: device=Dell is_on=None app_id=None volume_before=None "
+        "volume_after=None count=2 result=not_found volume_source=none"
+    ]
+    assert "判断: branch=not_found is_on=None level=None last_lowered_to=11" in caplog.text
+    assert "tick 結果: not_found device=Dell" in caplog.messages
+    assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["consecutive_lowered"] == 2
+    net["browser"].stop_discovery.assert_called_once()
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_no_lan_devices_has_one_idle_summary(
+    fake_network: Callable[[list[str]], Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    confirmed: bool,
+) -> None:
+    """LAN 0 台の一時不在と異常終了の両方を、要約の重複なく記録する。"""
+    from nemucast import auto_standby as auto
+    from tests.test_atv_volume import seed_atv
+
+    seed_atv(count=2, last=11)
+    alert = Mock(return_value=confirmed)
+    monkeypatch.setattr(auto, "update_discovery_alert", alert)
+    with fake_network([]) as net, caplog.at_level(logging.INFO):
+        if confirmed:
+            with pytest.raises(SystemExit) as exc:
+                auto.main(["--name", "Dell"])
+            assert exc.value.code == auto.EXIT_NO_DEVICE_ON_LAN
+        else:
+            auto.main(["--name", "Dell"])
+    summaries = [m for m in caplog.messages if m.startswith("tick 要約:")]
+    assert summaries == [
+        "tick 要約: device=Dell is_on=None app_id=None volume_before=None "
+        "volume_after=None count=2 result=no_lan_devices volume_source=none"
+    ]
+    alert.assert_called_once_with(lan_has_devices=False)
+    net["browser"].stop_discovery.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "mode,count",
+    [
+        ("idle", 0),
+        ("continuing_missing", 2),
+        ("cleanup_missing", 0),
+        ("pending_missing", 0),
+        ("pending_unpaired", 0),
+    ],
+)
+def test_outside_window_noop_has_one_idle_summary(
+    fake_network: Callable[[list[str]], Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    mode: str,
+    count: int,
+) -> None:
+    """窓外の各早期終了は呼出元と二重に要約を出さず、保持中の count を使う。"""
+    from nemucast import auto_standby as auto
+
+    monkeypatch.setattr(auto, "AUTO_NIGHT_FORCE", False)
+    monkeypatch.setattr(auto, "in_night_window", Mock(return_value=False))
+    if mode in ("continuing_missing", "cleanup_missing"):
+        TestNightMain.seed_session(stale=mode == "cleanup_missing")
+    elif mode.startswith("pending_"):
+        pending_atv()
+    if mode == "pending_unpaired":
+        auto.load_identity.return_value = None
+    names = ["Dell"] if mode == "pending_unpaired" else ["OtherDevice"]
+    with fake_network(names) as net, caplog.at_level(logging.INFO):
+        auto.main(["--name", "Dell"])
+    summaries = [m for m in caplog.messages if m.startswith("tick 要約:")]
+    assert summaries == [
+        "tick 要約: device=Dell is_on=None app_id=None volume_before=None "
+        f"volume_after=None count={count} result=outside_window volume_source=none"
+    ]
+    if mode == "idle":
+        net["get_listed"].assert_not_called()
+    else:
+        net["browser"].stop_discovery.assert_called_once()
+    auto.power_off.assert_not_awaited()
+    auto.read_power_state.assert_not_awaited()
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("failure", [False, True])
+def test_outside_window_delegated_tick_keeps_one_summary(
+    atv_rig: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    pending: bool,
+    failure: bool,
+) -> None:
+    """後始末・保留復元の正常終了と例外で、既存の要約を二重にしない。"""
+    from nemucast import auto_standby as auto
+    from tests.test_atv_volume import seed_atv
+
+    if pending:
+        pending_atv()
+        atv_rig.level = 10
+    else:
+        state = seed_atv(count=2, last=11)
+        state["updated_at"] -= auto.AUTO_STATE_STALE_SEC + 1
+        auto.save_state(auto.AUTO_STATE_FILE, state, touch=False)
+        atv_rig.level = 11
+    if failure:
+        atv_rig.cast.wait.side_effect = PyChromecastError("unavailable")
+    monkeypatch.setattr(auto, "AUTO_NIGHT_FORCE", False)
+    monkeypatch.setattr(auto, "in_night_window", Mock(return_value=False))
+    monkeypatch.setattr(auto, "discover_chromecasts", Mock(return_value=(atv_rig.cast, Mock())))
+    stop = Mock()
+    monkeypatch.setattr(auto, "stop_discovery", stop)
+    with caplog.at_level(logging.INFO):
+        auto.main(["--name", "Dell"])
+    summaries = [m for m in caplog.messages if m.startswith("tick 要約:")]
+    assert len(summaries) == 1
+    expected = "error" if failure else ("restored" if pending else "cleanup")
+    assert f"result={expected}" in summaries[0]
+    stop.assert_called_once()
+    auto.power_off.assert_not_awaited()
+
+
 def test_unchanged_volume_after_failed_off_retries_without_any_keys(atv_rig: Mock, caplog) -> None:
     from nemucast import auto_standby as auto
     from tests.test_atv_volume import seed_atv

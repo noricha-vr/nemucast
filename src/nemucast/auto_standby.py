@@ -422,6 +422,20 @@ def log_tick_summary(
     )
 
 
+def log_idle_summary(name: str, result: str, state: dict[str, Any] | None = None) -> None:
+    """機器を観測せずに終わる tick も、保持中のカウントとともに一行で記録する。"""
+    log_tick_summary(
+        name,
+        None,
+        None,
+        None,
+        None,
+        state.get("consecutive_lowered", 0) if state is not None else 0,
+        result,
+        volume_source="none",
+    )
+
+
 def finish_session(cast: Any, name: str) -> str:
     """ペアリング済みなら電源 OFF、未ペアリングならアプリ終了と日次通知を試す。"""
     expected_mac = load_identity(name)
@@ -493,6 +507,7 @@ async def run_atv_tick(control: AtvVolumeControl, state: dict[str, Any]) -> Tick
         logging.info("手動音量変更: previous=%s current=%d volume_source=atv", last, current)
         discard_pending_restore("manual_volume")
         state.update(consecutive_lowered=0, original_volume=current)
+        state["last_lowered_to"] = current
     if state["consecutive_lowered"] >= AUTO_LOWERED_THRESHOLD:
         return TickResult.STANDBY
     if state.get("original_volume") is None:
@@ -812,6 +827,7 @@ def cleanup_session(name: str, state: dict[str, Any]) -> None:
         if cast is None:
             logging.info("tick 結果: not_found device=%s", name)
             logging.warning("時間外の音量復元を保留: device=%s が見つかりません", name)
+            log_idle_summary(name, "outside_window", state)
             return
         process_device(cast, name, state, cleanup=True)
     except (TvPowerError, PyChromecastError, OSError, RuntimeError) as exc:
@@ -842,10 +858,12 @@ def restore_pending_outside_window(name: str, state: dict[str, Any]) -> None:
         cast, browser = discover_chromecasts(name)
         if cast is None:
             logging.info("tick 結果: not_found device=%s", name)
+            log_idle_summary(name, "outside_window", state)
             return
         cast.wait(timeout=CONNECT_TIMEOUT_SEC)
         expected_mac = load_identity(name)
         if expected_mac is None:
+            log_idle_summary(name, "outside_window", state)
             return
         is_on = asyncio.run(read_power_state(cast.cast_info.host, expected_mac))
         asyncio.run(
@@ -1093,6 +1111,7 @@ def main(args: list[str] | None = None) -> None:
                 restore_pending_outside_window(parsed.name, state)
                 return
             logging.info("tick 結果: outside_window")
+            log_idle_summary(parsed.name, "outside_window", state)
             return
         if not is_session_continuable(state):
             cleanup_session(parsed.name, state)
@@ -1108,12 +1127,15 @@ def main(args: list[str] | None = None) -> None:
             logging.warning("不在通知 state を更新できませんでした: %s", exc)
     if cast is None:
         logging.info("tick 結果: not_found device=%s", parsed.name)
+        log_atv_decision("not_found", None, None, state)
     if not night and cast is None:
         stop_discovery(browser)
+        log_idle_summary(parsed.name, "outside_window", state)
         return
     lan_has_devices = browser is not None and len(browser.devices) > 0
     if night and not lan_has_devices:
         stop_discovery(browser)
+        log_idle_summary(parsed.name, "no_lan_devices", state)
         # 目的デバイスが寝ていても他の Chromecast は常時 mDNS に出るので、
         # 0 台が続くのは環境側の障害。
         # macOS のローカルネットワーク権限が外れると LAN 宛 sendto が EHOSTUNREACH になり、
@@ -1134,6 +1156,7 @@ def main(args: list[str] | None = None) -> None:
         # 1日最大96回の失敗通知で本物の障害が埋もれる。
         logging.warning("デバイス '%s' が見つからないため何もしません。", parsed.name)
         stop_discovery(browser)
+        log_idle_summary(parsed.name, "not_found", state)
         return
 
     try:
