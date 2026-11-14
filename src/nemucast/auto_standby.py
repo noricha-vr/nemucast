@@ -499,10 +499,6 @@ async def run_atv_tick(control: AtvVolumeControl, state: dict[str, Any]) -> Tick
         state["original_volume"] = current
     # 送信途中で失敗しても復元先を失わない。
     save_state(AUTO_STATE_FILE, state)
-    # OFF を試す tick では UP/DOWN とも送らず、直前の音量のまま切る。
-    if state["consecutive_lowered"] + 1 >= AUTO_LOWERED_THRESHOLD:
-        state["consecutive_lowered"] += 1
-        return TickResult.STANDBY
     minimum = max(ATV_MIN_LEVEL, math.ceil(AUTO_MIN_LEVEL * maximum))
     steps = max(ATV_MIN_LEVEL, round(-STEP * maximum))
     target = min(current, max(minimum, current - steps))

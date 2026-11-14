@@ -127,31 +127,32 @@ def seed_atv(count: int = 1, original: int = 13, last: int = 12) -> dict[str, An
 def test_zero_cast_atv_three_ticks_defer_restore_before_power(
     rig: Mock, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """(a) Cast 0 固定でも実音量を下げ、3 回目はキーを送らず OFF。"""
+    """(a) Cast 0 固定でも実音量を 3 段下げ、UP は送らず OFF。"""
     with caplog.at_level(logging.INFO):
         for expected in (12, 11):
             rig.tick()
             assert rig.level == expected
             auto.power_off.assert_not_awaited()
         rig.tick()
-    assert rig.level == 11
+    assert rig.level == 10
     assert [e for e in rig.events if e[0] != "READ"] == [
         ("VOLUME_DOWN", 12),
         ("VOLUME_DOWN", 11),
-        ("POWER", 11),
+        ("VOLUME_DOWN", 10),
+        ("POWER", 10),
     ]
     # 各キーの直後に新規接続の読み戻し。その接続を次のキーにも再利用する。
     for index, event in enumerate(rig.events):
         if event[0].startswith("VOLUME_"):
             assert rig.events[index + 1] == ("READ", event[1])
-    assert len(rig.remotes) == 5  # 初回 3 接続 + 2 キーの読み戻し
-    assert tv_volume.read_mac.await_count == 5
+    assert len(rig.remotes) == 6  # 初回 3 接続 + 3 キーの読み戻し
+    assert tv_volume.read_mac.await_count == 6
     assert all(not remote.connected for remote in rig.remotes)
     rig.cast.set_volume.assert_not_called()
     assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["original_volume"] is None
     summaries = [m for m in caplog.messages if m.startswith("tick 要約:")]
     assert len(summaries) == 3
-    assert "count=3 result=turned_off volume_source=atv atv_level=11/30" in summaries[-1]
+    assert "count=3 result=turned_off volume_source=atv atv_level=10/30" in summaries[-1]
     assert "volume=0.0 volume_source=atv atv_level=11/30" in caplog.text
     assert "音量復元を保留" in caplog.text
 

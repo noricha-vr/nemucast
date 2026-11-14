@@ -1738,12 +1738,12 @@ def test_standby_has_no_volume_keys_and_saves_pending_before_power(atv_rig: Mock
         assert auto.load_pending_restore("Dell") == {
             "device_name": "Dell",
             "level": 13,
-            "left_at": 11,
+            "left_at": 10,
             "max": 30,
             "created_at": auto.load_pending_restore("Dell")["created_at"],
         }
         assert auto.load_state(auto.AUTO_STATE_FILE, "Dell")["consecutive_lowered"] == 3
-        assert not [e for e in atv_rig.events if e[0].startswith("VOLUME_")]
+        assert not [e for e in atv_rig.events if e[0] == "VOLUME_UP"]
         return "turned_off"
 
     auto.power_off.side_effect = off
