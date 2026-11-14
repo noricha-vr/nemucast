@@ -416,7 +416,8 @@ def test_cleanup_restore_progress_survives_disconnect_and_retry_finishes(rig: Mo
     assert rig.level == 10
     rig.tick()
     assert rig.level == 12
-    assert auto.load_pending_restore("Dell")["left_at"] == 12
+    pending = auto.load_pending_restore("Dell")
+    assert (pending["left_min"], pending["left_at"]) == (10, 15)
     assert auto.load_pending_restore("Dell")["level"] == 15
     tv_volume.AndroidTVRemote.side_effect = real_factory
     rig.send_error = original_send

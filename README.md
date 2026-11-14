@@ -86,7 +86,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 
 1. 時間外は新しいセッションを開始しません。`original_volume` があり state が新鮮なら完走します。stale なら後始末します。ATV は音量キーを送らず保留へ移します。Cast は従来どおり手動上昇を尊重して復元します。進行中セッションが無く保留だけあれば、対象を探して点灯中の保留復元だけ試します。接続・照合できなければ次 tick へ持ち越します。
 2. Cast を発見し、`cast.wait` の後、ペアリング済みなら `read_power_state` で MAC を照合します。不一致や接続失敗時は、音量・生値ログ・アプリ判定より前に中断します（未ペアリング時は名前のみで選び、MAC を照合できません）。照合時に読んだ `is_on=True`、または status があり `app_id` が None・空文字・pychromecast の `IDLE_APP_ID`（Backdrop）以外なら視聴中です。追加の電源状態接続は行いません。未ペアリングはアプリ起動中だけで判定します。`is_on=False` でもアプリ起動中なら Cast 経路は制御します。ATV 経路は `is_on=True` の時だけキーを送ります。`is_idle`・`is_stand_by`・`is_active_input`・`player_state` は判定に使いません。どちらも満たさない時だけ `not_watching` と記録し、元音量が残っていれば時間外と同じ後始末（ATV は保留）を行い、state を初期化して終了します。
-ペアリング済みで有効な ATV の保留があれば、Cast が正の音量を返しても ATV 経路を優先します（OFF 失敗後の再試行・後始末の優先順位は維持）。保留がない時の音量源は有効な正の Cast 音量なら `cast`、Cast が 0 以下（許容誤差 `1e-6`）・未受信・不正値で、ペアリング済みかつ MAC 照合後の ATV 音量（整数 `level`、`max>0`）が取れた時だけ `atv` です。ATV の 1 tick の下げ幅は `max(1, round(-STEP * max))` 段、下限は `max(1, ceil(AUTO_MIN_LEVEL * max))` 段とし、下限より小さい現在音量は上げません。各キーの送信後に新規接続・MAC 照合で読み戻し、その接続を次のキーに使います。実際に下がらなければ `volume_unchanged` としてカウントを据え置きます。ATV の手動操作は上昇・下降とも `level != last_lowered_to` で判定し、元音量を現在値へ更新して数え直します。OFF 失敗後の閾値持ち越しも同じ判定を先に行い、同値なら音量キーなしで POWER のみ再試行します。OFF を試す tick は音量キーを送らず、POWER 前に元音量と最後に置いた段を `AUTO_PENDING_RESTORE_FILE` に保存します。後始末（`cleanup` / `not_watching`）でもキーを送らず保留へ移し state を初期化します。点灯中に手動で音量が変わっていれば保留を破棄します。消灯中の ATV 音量（0 や 1）は信用せず読みません。次の点灯中 tick で機器名・max が一致し、現在音量が保留の `left_at` と等しい時だけ、既存のキーごとの読み戻しで元音量へ戻します（許容差 1 段）。成功は `restored`・count=0 で state を初期化し、その tick は下げません。失敗は WARNING と `restore_pending` を記録して保留を残します。各読み戻し接続でも `is_on=True` を確認し、復元途中に消灯または電源不明になったら音量値を採用せず、途中の進捗でも `left_at` を更新しないまま終了します。追加の電源確認接続は行いません。現在音量が違えば人の変更として保留を破棄し、通常処理を続けます。保留に有効期限はありません。窓外で進行中セッションが無ければ保留復元だけを試し、下げ・POWER は行いません。音量源または ATV の max が変わったら単位を混ぜずセッションを初期化し、元音量かカウントがある時だけ WARNING を出します。
+ペアリング済みで有効な ATV の保留があれば、Cast が正の音量を返しても ATV 経路を優先します（OFF 失敗後の再試行・後始末の優先順位は維持）。保留がない時の音量源は有効な正の Cast 音量なら `cast`、Cast が 0 以下（許容誤差 `1e-6`）・未受信・不正値で、ペアリング済みかつ MAC 照合後の ATV 音量（整数 `level`、`max>0`）が取れた時だけ `atv` です。ATV の 1 tick の下げ幅は `max(1, round(-STEP * max))` 段、下限は `max(1, ceil(AUTO_MIN_LEVEL * max))` 段とし、下限より小さい現在音量は上げません。各キーの送信後に新規接続・MAC 照合で読み戻し、その接続を次のキーに使います。実際に下がらなければ `volume_unchanged` としてカウントを据え置きます。ATV の手動操作は上昇・下降とも `level != last_lowered_to` で判定し、元音量を現在値へ更新して数え直します。OFF 失敗後の閾値持ち越しも同じ判定を先に行い、同値なら音量キーなしで POWER のみ再試行します。OFF を試す tick は音量キーを送らず、POWER 前に元音量と最後に置いた段を `AUTO_PENDING_RESTORE_FILE` に保存します。後始末（`cleanup` / `not_watching`）でもキーを送らず保留へ移し state を初期化します。点灯中に手動で音量が変わっていれば保留を破棄します。消灯中の ATV 音量（0 や 1）は信用せず読みません。次の点灯中 tick で機器名・max が一致し、現在音量が保留の `left_min <= 現在音量 <= left_at`（`left_min` の省略時は `left_at`）の範囲内にある時だけ、既存のキーごとの読み戻しで元音量へ戻します（許容差 1 段）。復元の VOLUME_UP 送信前に `left_min=復元開始時の現在音量`・`left_at=復元先の元音量` として許容範囲を保存し、保存に失敗したらキーを送りません。読み戻しに失敗してもこの範囲を維持し、次 tick の範囲内の音量は自分の復元途中として扱います。成功は `restored`・count=0 で state を初期化し、その tick は下げません。失敗は WARNING と `restore_pending` を記録して保留を残します。各読み戻し接続でも `is_on=True` を確認し、復元途中に消灯または電源不明になったら音量値を採用せず、送信前に保存した `left_min`・`left_at` の範囲を維持して終了します。追加の電源確認接続は行いません。現在音量が範囲外なら人の変更として保留を破棄し、通常処理を続けます。保留に有効期限はありません。窓外で進行中セッションが無ければ保留復元だけを試し、下げ・POWER は行いません。音量源または ATV の max が変わったら単位を混ぜずセッションを初期化し、元音量かカウントがある時だけ WARNING を出します。
 
 必要な音量がどちらからも取れない時は `volume_unavailable` を WARNING と tick 要約に記録し、カウント・復元情報を保持して音量操作も電源 OFF もしません。通知は `AUTO_VOLUME_ALERT_FILE=logs/auto_volume_alert_state.json` にローカル日付の成功日を保存し、同日 1 回まで（失敗時は失敗が続く次 tick で再送）。視聴しておらず復元情報もない時は従来どおり `not_watching` で終了します。
 
@@ -166,7 +166,7 @@ flowchart TD
     Source -->|不明| Unavailable[volume_unavailable・state 保持]
     On -->|No| Cleanup
     On -->|Yes| Retry{閾値持ち越し?}
-    Retry -->|No| Pending{保留あり・max と現在段が一致?}
+    Retry -->|No| Pending{保留あり・max 一致・現在段が許容範囲内?}
     Pending -->|Yes| Restore[UP と読み戻し・restored / restore_pending・下げず終了]
     Pending -->|不一致は破棄 / なし| Manual
     Retry -->|Yes| Manual{現在段が last と違う?}
@@ -212,7 +212,7 @@ flowchart TD
 - 手動実行ログ: `logs/lower_cast_volume.log`
 - state:
   - `nemucast-auto` → `logs/auto_standby_state.json`
-  - ATV の保留復元 → `logs/auto_pending_restore.json`（`device_name`, `level`=元音量, `left_at`=最後に置いた段, `max`, `created_at`=UNIX 秒。破損・対象違いは無視）
+  - ATV の保留復元 → `logs/auto_pending_restore.json`（`device_name`, `level`=元音量, `left_at`=人の操作なしとみなす音量範囲の上端, `left_min`=任意の下端（省略時は `left_at`。未確認の下降では目標段、復元開始時は現在段）, `max`, `created_at`=UNIX 秒。復元 UP 送信前は上端を元音量へ広げ、読み戻し失敗時も範囲を維持。破損・対象違いは無視）
   - 目的名不在通知 → `logs/auto_not_found_alert_state.json`（LAN 0 台検知は `logs/discovery_alert_state.json`）
   - 音量取得不可の通知成功日 → `logs/auto_volume_alert_state.json`
   - 電源 OFF 不可の通知日 → `logs/auto_power_off_alert_state.json`

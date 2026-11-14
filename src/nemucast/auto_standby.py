@@ -62,7 +62,6 @@ from nemucast.tv_volume import (
     AtvVolume,
     AtvVolumeControl,
     TvVolumeError,
-    TvVolumePowerError,
 )
 
 AUTO_MIN_LEVEL = float(os.getenv("AUTO_MIN_LEVEL", "0.05"))
@@ -528,18 +527,16 @@ async def run_atv_tick(control: AtvVolumeControl, state: dict[str, Any]) -> Tick
 
 
 async def restore_atv_volume(control: AtvVolumeControl, pending: dict[str, Any]) -> bool:
-    """点灯中だけ保留を復元する。途中で点灯が不明になれば元の保留を維持する。"""
+    """送信前に復元範囲を保存し、読み戻せなくても自分の上昇を保留に含める。"""
+    if control.volume.level < pending["level"]:
+        pending.update(left_min=control.volume.level, left_at=pending["level"])
+        save_state(AUTO_PENDING_RESTORE_FILE, pending, touch=False)
     try:
         after = await control.move_to(pending["level"])
         if abs(after.level - pending["level"]) > ATV_RESTORE_TOLERANCE:
             raise TvVolumeError("ATV 音量の復元先との差が 1 段を超えています")
     except TvPowerError as exc:
         logging.warning("音量復元を読み戻しで確認できませんでした: %s", exc)
-        if not isinstance(exc, TvVolumePowerError) and control.volume.level < pending["level"]:
-            pending["left_at"] = control.volume.level
-            if "left_min" in pending:
-                pending["left_min"] = control.volume.level
-            save_state(AUTO_PENDING_RESTORE_FILE, pending, touch=False)
         return False
     logging.info("音量復元を読み戻しで確認: original_volume=%d volume_source=atv", pending["level"])
     discard_pending_restore("restored")

@@ -32,7 +32,7 @@ Chromecast の active / idle 判定には依存せず、`前回自動設定し�
 - auto はペアリング済みなら `cast.wait` 後、音量・生値ログ・アプリ判定より先に `read_power_state` で MAC を照合する（戻り値の `is_on` を視聴判定にも使い、追加接続はしない）。未ペアリングの機器は名前のみで選び、MAC を照合できない。
 - auto はペアリング済みの `is_on=True`、または `cast.status.app_id` が None・空文字・Backdrop 以外なら視聴中とする。未ペアリングはアプリ起動中だけで判定する。`is_idle`・CEC フラグ・`player_state` は判定に使わず、どちらも満たさない時だけ `not_watching` として元音量があれば後始末後に state を初期化する（ATV はキーを送らず保留、Cast は従来の復元。手動操作は保つ）。
 
-- ペアリング済みで有効な ATV の保留があれば、Cast が正の音量を返しても ATV 経路を優先します（OFF 失敗後の再試行・後始末の優先順位は維持）。保留がない時の音量源は有効な正の Cast 音量なら `cast`、Cast が 0 以下（許容誤差 `1e-6`）・未受信・不正値で、ペアリング済みかつ MAC 照合後の ATV 音量（整数 `level`、`max>0`）が取れた時だけ `atv` です。ATV の 1 tick の下げ幅は `max(1, round(-STEP * max))` 段、下限は `max(1, ceil(AUTO_MIN_LEVEL * max))` 段とし、下限より小さい現在音量は上げません。各キーの送信後に新規接続・MAC 照合で読み戻し、その接続を次のキーに使います。実際に下がらなければ `volume_unchanged` としてカウントを据え置きます。ATV の手動操作は上昇・下降とも `level != last_lowered_to` で判定し、元音量を現在値へ更新して数え直します。OFF 失敗後の閾値持ち越しも同じ判定を先に行い、同値なら音量キーなしで POWER のみ再試行します。OFF を試す tick は音量キーを送らず、POWER 前に元音量と最後に置いた段を `AUTO_PENDING_RESTORE_FILE` に保存します。後始末（`cleanup` / `not_watching`）でもキーを送らず保留へ移し state を初期化します。点灯中に手動で音量が変わっていれば保留を破棄します。消灯中の ATV 音量（0 や 1）は信用せず読みません。次の点灯中 tick で機器名・max が一致し、現在音量が保留の `left_min <= level <= left_at`（`left_min` の省略時は `left_at`）の範囲内にある時だけ、既存のキーごとの読み戻しで元音量へ戻します（許容差 1 段）。成功は `restored`・count=0 で state を初期化し、その tick は下げません。失敗は WARNING と `restore_pending` を記録して保留を残します。各読み戻し接続でも `is_on=True` を確認し、復元途中に消灯または電源不明になったら音量値を採用せず、途中の進捗でも `left_at` を更新しないまま終了します。追加の電源確認接続は行いません。現在音量が範囲外なら人の変更として保留を破棄し、通常処理を続けます。保留に有効期限はありません。窓外で進行中セッションが無ければ保留復元だけを試し、下げ・POWER は行いません。音量源または ATV の max が変わったら単位を混ぜずセッションを初期化し、元音量かカウントがある時だけ WARNING を出します。
+- ペアリング済みで有効な ATV の保留があれば、Cast が正の音量を返しても ATV 経路を優先します（OFF 失敗後の再試行・後始末の優先順位は維持）。保留がない時の音量源は有効な正の Cast 音量なら `cast`、Cast が 0 以下（許容誤差 `1e-6`）・未受信・不正値で、ペアリング済みかつ MAC 照合後の ATV 音量（整数 `level`、`max>0`）が取れた時だけ `atv` です。ATV の 1 tick の下げ幅は `max(1, round(-STEP * max))` 段、下限は `max(1, ceil(AUTO_MIN_LEVEL * max))` 段とし、下限より小さい現在音量は上げません。各キーの送信後に新規接続・MAC 照合で読み戻し、その接続を次のキーに使います。実際に下がらなければ `volume_unchanged` としてカウントを据え置きます。ATV の手動操作は上昇・下降とも `level != last_lowered_to` で判定し、元音量を現在値へ更新して数え直します。OFF 失敗後の閾値持ち越しも同じ判定を先に行い、同値なら音量キーなしで POWER のみ再試行します。OFF を試す tick は音量キーを送らず、POWER 前に元音量と最後に置いた段を `AUTO_PENDING_RESTORE_FILE` に保存します。後始末（`cleanup` / `not_watching`）でもキーを送らず保留へ移し state を初期化します。点灯中に手動で音量が変わっていれば保留を破棄します。消灯中の ATV 音量（0 や 1）は信用せず読みません。次の点灯中 tick で機器名・max が一致し、現在音量が保留の `left_min <= 現在音量 <= left_at`（`left_min` の省略時は `left_at`）の範囲内にある時だけ、既存のキーごとの読み戻しで元音量へ戻します（許容差 1 段）。復元の VOLUME_UP 送信前に `left_min=復元開始時の現在音量`・`left_at=復元先の元音量` として許容範囲を保存し、保存に失敗したらキーを送りません。読み戻しに失敗してもこの範囲を維持し、次 tick の範囲内の音量は自分の復元途中として扱います。成功は `restored`・count=0 で state を初期化し、その tick は下げません。失敗は WARNING と `restore_pending` を記録して保留を残します。各読み戻し接続でも `is_on=True` を確認し、復元途中に消灯または電源不明になったら音量値を採用せず、送信前に保存した `left_min`・`left_at` の範囲を維持して終了します。追加の電源確認接続は行いません。現在音量が範囲外なら人の変更として保留を破棄し、通常処理を続けます。保留に有効期限はありません。窓外で進行中セッションが無ければ保留復元だけを試し、下げ・POWER は行いません。音量源または ATV の max が変わったら単位を混ぜずセッションを初期化し、元音量かカウントがある時だけ WARNING を出します。
 - 必要な音量がどちらからも取れない時は `volume_unavailable` を WARNING と tick 要約に記録し、カウント・復元情報を保持して音量操作も電源 OFF もしません。通知は `AUTO_VOLUME_ALERT_FILE=logs/auto_volume_alert_state.json` にローカル日付の成功日を保存し、同日 1 回まで（失敗時は失敗が続く次 tick で再送）。視聴しておらず復元情報もない時は従来どおり `not_watching` で終了します。
 
 ### 2 つの運用（periodic-worker の別タスク。普段は両方 active）
@@ -146,12 +146,12 @@ state を持つのは `nemucast-auto` と `nemucast`（手動）の 2 つで、�
 |------|------|
 | `device_name` | 対象機器名。一致時だけ処理 |
 | `level` | 復元する元音量（整数段） |
-| `left_at` | 自分が最後に置いた音量。未確認の下降範囲があれば `from` を保存し、人の操作なしとみなす範囲の上限にする |
-| `left_min` | 任意の整数段。省略時は `left_at`。未確認の下降範囲の `to` を保存する下限で、`left_min <= level <= left_at` なら復元する |
+| `left_at` | 人の操作なしとみなす音量範囲の上端。通常は最後に置いた段、未確認の下降範囲があれば `from`、復元 UP 送信前は復元先の元音量を保存する |
+| `left_min` | 任意の整数段。省略時は `left_at`。未確認の下降では `to`、復元 UP 送信前は復元開始時の現在段を保存する下端。`left_min <= 現在音量 <= left_at` なら復元する |
 | `max` | ATV の最大段。一致時だけ復元 |
 | `created_at` | 作成 UNIX 秒。有効期限なし |
 
-保存は `save_state(..., touch=False)` の一時ファイル + `os.replace`。破損・不正値は無視。`left_min` も整数段として検証し、`0 <= left_min <= left_at <= level <= max` かつ復元先の `level > left_min` を必須とする。`last_lowered_to` が None でも `original_volume` と `atv_lowering` があれば `left_at=from`・`left_min=to` として保留する。OFF 前に保存できなければ POWER を送らない。復元成功時または手動変更・max 不一致で破棄する。読み戻し失敗は保留を保持し、点灯中に最後に確認できた段を `left_at` に残し、`left_min` があれば同じ段に更新して範囲を確定する。ただし復元中の消灯・電源不明では `left_at`・`left_min` を更新せず元のまま残す。窓外で進行中セッションが無ければ、対象を探して点灯中の保留復元だけを行う。
+保存は `save_state(..., touch=False)` の一時ファイル + `os.replace`。破損・不正値は無視。`left_min` も整数段として検証し、`0 <= left_min <= left_at <= level <= max` かつ復元先の `level > left_min` を必須とする。`last_lowered_to` が None でも `original_volume` と `atv_lowering` があれば `left_at=from`・`left_min=to` として保留する。OFF 前に保存できなければ POWER を送らない。復元成功時または手動変更・max 不一致で破棄する。復元 UP 送信前に `left_min=復元開始時の現在段`・`left_at=復元先の元音量` を保存し、保存失敗時はキーを送らない。読み戻し失敗・途中の消灯・電源不明でも、この送信前の範囲を保持して確認済みの途中段へ狭めない。次 tick で範囲内なら復元を再試行し、範囲外なら人の操作として破棄する。窓外で進行中セッションが無ければ、対象を探して点灯中の保留復元だけを行う。
 
 `nemucast`（`logs/activity_state.json`）:
 
