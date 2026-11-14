@@ -107,7 +107,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 | `AUTO_RESTORE_TOLERANCE` | Cast 読み戻しの許容差（ATV は 1 段以内） | `0.015` |
 | `AUTO_ATV_VOLUME_WAIT_SEC` | ATV 音量の初回 push とキー送信後の更新通知を待つ秒数 | `5` |
 | `AUTO_VOLUME_ALERT_FILE` | 音量取得不可の通知成功日と再送待ち | `logs/auto_volume_alert_state.json` |
-| `AUTO_LOWERED_THRESHOLD` | 電源 OFF までの段階制御 tick 数（ATV 最終 tick はキーなし） | `3` |
+| `AUTO_LOWERED_THRESHOLD` | 電源 OFF までの段階制御 tick 数（ATV 最終 tick も 1 段下げてから切る） | `3` |
 | `AUTO_MIN_LEVEL` | 下限音量 | `0.05` |
 | `AUTO_PENDING_RESTORE_FILE` | ATV の保留復元（有効期限なし）。一時ファイル + `os.replace` で保存 | `logs/auto_pending_restore.json` |
 | `AUTO_STATE_FILE` | 自動制御の state 保存先 | `logs/auto_standby_state.json` |
@@ -124,7 +124,7 @@ uv run nemucast --interval 900 --inactive-threshold 4 --run-until-standby
 
 - 対象 Cast だけが見つからない時は正常終了します。窓内で不在が既定 4 tick 続いたら一度だけ通知し、発見できたら回復も一度通知します。通知失敗時は次 tick で再送します。未通知の連続回数は stale でリセットし、通知済みの途切れは回復まで保持します。窓外では不在・回復とも記録を更新しません。LAN 全体で 0 台が続いた時は従来どおり ERROR・終了コード 2 とし、障害確定時と回復時に 1 回ずつ通知します。夜間窓の中だけこの検知を行います。
 - launchd 配下では、そのプロセスに macOS の「プライバシーとセキュリティ > ローカルネットワーク」の許可が必要です。
-- 音量に触れず視聴中の判定が続く場合も、夜間窓の中では3 tick 目で電源 OFF を試します（ATV の最終 tick はキー送信なし）。mDNS・CEC 値は視聴中の判定に使いません。ペアリング後に実際の電源を切る時は `power_off` 内で `is_on` を確認します。
+- 音量に触れず視聴中の判定が続く場合も、夜間窓の中では3 tick 目で電源 OFF を試します（ATV は最終 tick でも 1 段下げてから切る。UP は送らない）。mDNS・CEC 値は視聴中の判定に使いません。ペアリング後に実際の電源を切る時は `power_off` 内で `is_on` を確認します。
 - stale な state は連続カウントを捨てますが、復元用 `original_volume` は保持します。すでに閾値に達した電源 OFF の再試行も保持します。`volume_source` のない旧 state は Cast 比率として読みます。ATV は `volume_max`、整数の `original_volume` と `last_lowered_to` を持ちます。旧 `powered_off` / `volume_at_power_off` は使用しません。壊れた JSON は作り直して続行し、保存は一時ファイルと置き換えで行います。
 
 ### 2 つの運用と止め方
@@ -174,7 +174,7 @@ flowchart TD
     Manual -->|No| Threshold
     Reset --> Threshold{今回 OFF を試す?}
     Threshold -->|No| Lower[段階的に下げ・読み戻し・state 保存]
-    Threshold -->|Yes| SavePending[音量キーなし・POWER 前に保留保存]
+    Threshold -->|Yes| SavePending[最後の 1 段を下げ（再試行はキーなし）・UP なし・POWER 前に保留保存]
     SavePending --> Off[POWER・OFF 待ち・新規接続で読み戻し]
     Off -->|OFF 後に点け直し| Woken[woken・再送なし・state 初期化・保留維持]
     Off -->|OFF 未観測| Recheck[追加読み戻しで True の時だけ再送]
@@ -200,7 +200,7 @@ flowchart TD
 | 想定スケジュール | 時刻指定（例: 20:00） | 15分間隔・夜間に開始して完走 | 任意のタイミングで手動実行 |
 | 音量制御 | しない（テレビ本体の電源を切る） | する | する |
 | state | 持たない | `auto_standby_state.json` + `auto_pending_restore.json` | `activity_state.json` |
-| 電源OFF条件 | 即時 | 段階制御の 3 tick 目（ATV 最終 tick はキーなし） | 連続 N tick 非アクティブ |
+| 電源OFF条件 | 即時 | 段階制御の 3 tick 目（ATV 最終 tick も 1 段下げてから切る） | 連続 N tick 非アクティブ |
 | 用途 | ハードな時刻カットオフ | 寝落ち検知の自動運転 | デバッグ・手動投入 |
 
 ## 📝 ログと state
@@ -208,7 +208,7 @@ flowchart TD
 - 即時 standby ログ: `logs/standby.log`
 - 自動寝かしつけログ: `logs/auto_standby.log`。`tick 結果: lowered / outside_window / cleanup / not_watching / turned_off / not_found / power_off_unavailable / volume_unavailable / volume_unchanged / restored / restore_pending / woken / error` と音量復元・カウントを記録します。接続・機器照合後は毎 tick、`対象機器の生値: device=... is_on=... app_id=... display_name=... is_idle=... is_stand_by=... is_active_input=... volume=... volume_source=cast|atv|none [atv_level=n/max]` を INFO に 1 行出します。`app_id` / `display_name` は制御文字を escape し、各 64 文字以内に制限します。ペアリング後の OFF 試行時にすでに消灯なら `power_off` の戻り値 `already_off` も記録します
 - 確認例: `rg "判断:|tick 結果:|tick 要約:|POWER 読み戻し:|対象機器の生値:|音量復元|ERROR" logs/auto_standby.log`。初回の夜間運転後、ATV は OFF 前に復元していないこと、点け直し時に POWER を再送していないこと、窓の外で新規セッションが始まっていないこと（進行中なら `lowered` は正常）を確認します
-- 各機器処理の正常終了時と例外時（`result=error`、不明な観測値は `None`）に `tick 要約:` を 1 行出します。`grep "tick 要約" logs/auto_standby.log` で、操作前の `is_on` / `app_id`、`volume_before`（開始音量）/ `volume_after`（終了時の目標音量）、`count`、`result`、`volume_source` を確認できます。ATV の音量は整数段で、末尾の `atv_level=n/max` は最後に確認できた読み戻し値です。未ペアの `is_on` と不明な音量は `None` です。音量を変えなければ前後は同値です。`count` はその tick の連続回数で、`not_watching` / `cleanup` は初期化後の 0、OFF 結果は初期化前の回数です。
+- 全 tick（機器処理の正常終了・例外 `result=error`・機器を観測せず終わる `not_found` / `outside_window` / `no_lan_devices` を含む。不明な観測値は `None`）に `tick 要約:` を 1 行出します。`grep "tick 要約" logs/auto_standby.log` で、操作前の `is_on` / `app_id`、`volume_before`（開始音量）/ `volume_after`（終了時の目標音量）、`count`、`result`、`volume_source` を確認できます。ATV の音量は整数段で、末尾の `atv_level=n/max` は最後に確認できた読み戻し値です。未ペアの `is_on` と不明な音量は `None` です。音量を変えなければ前後は同値です。`count` はその tick の連続回数で、`not_watching` / `cleanup` は初期化後の 0、OFF 結果は初期化前の回数です。
 - 手動実行ログ: `logs/lower_cast_volume.log`
 - state:
   - `nemucast-auto` → `logs/auto_standby_state.json`
